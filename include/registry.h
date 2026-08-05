@@ -53,7 +53,8 @@ extern pthread_mutex_t registry_lock;
 extern room_t *room_list[MAX_ROOMS];
 extern int room_count;
 
-room_t* find_or_create_room(const char *room_name, client_t *creator_client);
+room_t* create_room(const char *room_name, client_t *creator_client);
+room_t* find_room(const char *room_name);
 int room_add_member(room_t *room, client_t *client);
 int room_remove_member(room_t *room, client_t *client);
 void room_broadcast(room_t *room, const char *msg, int exclude_fd);
