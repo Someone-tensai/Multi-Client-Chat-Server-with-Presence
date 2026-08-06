@@ -23,7 +23,12 @@ typedef enum {
     ROOM_ERR_ALREADY_EXISTS,
     ROOM_ERR_MAX_ROOMS,
     ROOM_ERR_ALLOC_FAILED,
-    ROOM_ERR_MEMBER_NOT_IN_ROOM
+    ROOM_ERR_MEMBER_NOT_IN_ROOM,
+    ROOM_ERR_NOT_FOUND,
+    ROOM_ERR_NULL,
+    ROOM_ERR_MAX_MEMBERS,
+    ROOM_ERR_INVALID_CLIENT,
+    ROOM_ERR_CLIENT_NOT_FOUND,
 } room_err_t;
 
 // Error Codes for Client
@@ -86,8 +91,9 @@ void room_remove_member(room_t *room, client_t *client, room_err_t *err);
 void room_broadcast(room_t *room, const char *msg, int exclude_fd);
 void delete_room(room_t *room, room_err_t *err);
 
-client_t *registry_create_client(int socket_fd, const char* client_name, client_err_t *err);
-client_t *registry_find_client(const char *username, client_err_t *err);
+client_t *create_client(int socket_fd, const char* client_name, client_err_t *err);
+client_t *find_client_unlocked(const char *username, client_err_t *err);
+client_t *find_client(const char *username, client_err_t *err);
 void delete_client(client_t *client, client_err_t *err);
 
 
