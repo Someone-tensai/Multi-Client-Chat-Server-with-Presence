@@ -39,6 +39,7 @@ typedef enum {
     CLIENT_ERR_MAX_CLIENTS,
     CLIENT_ERR_ALLOC_FAILED,
     CLIENT_ERR_NOT_FOUND,
+    CLIENT_ERR_NULL,
 
 } client_err_t;
 
@@ -66,7 +67,6 @@ typedef struct room_t {
 // Client Definition
 typedef struct client_t {
     int socket_fd;
-    int client_id;
     char client_name[MAX_USERNAME_LEN];
     room_t* current_room;
 

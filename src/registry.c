@@ -1,7 +1,7 @@
 #include "../include/registry.h"
 #include "../include/protocol.h"
 #include <string.h>
-#include <malloc.h>
+#include <stdlib.h>
 #include <sys/socket.h>
 
 // Defining the Extern Variables
@@ -23,6 +23,7 @@ room_t *find_room_unlocked(const char* room_name, room_err_t *err)
     {
         if(strcmp(room_list[i]->room_name, room_name) == 0)
         {
+            *err = ROOM_OK;
             return room_list[i];
         }
     }
@@ -139,6 +140,22 @@ void shift_array_room(room_t *room, int start_index, int end_index)
         room->members[i] = room->members[i+1];
     }
 }
+
+void shift_array_room_list(room_t *room_list[], int start_index, int end_index)
+{
+    for(int i = start_index ; i < end_index; i++)
+    {
+        room_list[i] = room_list[i+1];
+    }
+}
+
+void shift_array_client_list(client_t *client_list[], int start_index, int end_index)
+{
+    for(int i = start_index ; i < end_index; i++)
+    {
+        client_list[i] = client_list[i+1];
+    }
+}
 // When a Member leaves a Room
 void room_remove_member(room_t *room, client_t *client, room_err_t *err)
 {
@@ -157,13 +174,7 @@ void room_remove_member(room_t *room, client_t *client, room_err_t *err)
     }
 
     pthread_mutex_lock(&registry_lock);
-    // Check if Max Members Reached
-    if(room->member_count <= 0)
-    {
-        *err = ROOM_ERR_NULL;
-        pthread_mutex_unlock(&registry_lock);
-        return;
-    }
+   
     // Find Client's Index (Not same as their id as that is in the global client list not in room members)
     int client_index = -1;
     for(int i = 0 ; i < room->member_count; i++)
@@ -200,22 +211,70 @@ void room_remove_member(room_t *room, client_t *client, room_err_t *err)
 // Message Brodcast to all clients (The Chat essentially)
 void room_broadcast(room_t *room, const char *msg, int exclude_fd)
 {
-    pthread_mutex_lock(&registry_lock);
-    
-    for(int i = 0; i < room->member_count; i++)
-    {
-        // Get Individual fds
-        int fd = room->members[i]->socket_fd;
-        // Exclude the client who sent the message
-        if(fd == exclude_fd) continue;
-        send(fd, msg, strlen(msg), 0);
-    }
-    pthread_mutex_unlock(&registry_lock);
-}   
+    if (room == NULL) return;
 
+    pthread_mutex_lock(&registry_lock);
+    // Array of fds to avoid stalling when send takes long (not holding the lock)
+    int fds[MAX_MEMBERS];
+    int count = room->member_count;
+
+    // Populating the fds array
+    for(int i = 0; i < count; i++) fds[i] = room->members[i]->socket_fd;
+    pthread_mutex_unlock(&registry_lock);
+
+    for(int i = 0; i < count; i++)
+    {
+        if(fds[i] == exclude_fd) continue;
+        send(fds[i], msg, strlen(msg), 0);
+    }
+    return;
+}  
+
+// Delete the Room 
 void delete_room(room_t *room, room_err_t *err)
 {
+    pthread_mutex_lock(&registry_lock);
 
+    if(room == NULL)
+    {
+        *err = ROOM_ERR_NULL;
+        pthread_mutex_unlock(&registry_lock);
+        return;
+    }
+
+    // Find the Room's Index
+    int room_index = -1;
+    for(int i = 0; i < room_count; i++)
+    {
+        if(room_list[i] == room)
+        {
+            room_index = i;
+            break;
+        }
+    }
+
+    if(room_index == -1)
+    {
+        *err = ROOM_ERR_NOT_FOUND;
+        pthread_mutex_unlock(&registry_lock);
+        return;
+    }
+
+    room_count -= 1;
+
+    // If any other position other than last one
+    if(room_index != room_count)
+    {
+        shift_array_room_list(room_list, room_index, room_count);
+    }
+
+    // Clean the array and free the malloc allocated memory
+    room_list[room_count] = NULL;
+    free(room);
+
+    pthread_mutex_unlock(&registry_lock);
+    *err = ROOM_OK;
+    return;
 }
 
 // Client Related Functions
@@ -262,8 +321,7 @@ client_t *create_client(int socket_fd, const char* client_name, client_err_t *er
     strncpy(new_client->client_name, client_name, MAX_USERNAME_LEN);
     new_client->client_name[MAX_USERNAME_LEN-1] = '\0';
     new_client->socket_fd = socket_fd;    
-    new_client->client_id = client_count;
-
+    new_client->current_room = NULL;
     // Add the client to the global client list
     client_list[client_count++] = new_client;
 
@@ -273,6 +331,7 @@ client_t *create_client(int socket_fd, const char* client_name, client_err_t *er
 
 }
 
+// Find a Client (Unlocked to be wrapped by others)
 client_t* find_client_unlocked(const char *username, client_err_t *err)
 {
     // Loop Through All Made Clients and Compare their IDs
@@ -280,6 +339,7 @@ client_t* find_client_unlocked(const char *username, client_err_t *err)
     {
         if(strcmp(client_list[i]->client_name, username) == 0)
         {
+            *err = CLIENT_OK;
             return client_list[i];
         }
     }
@@ -288,6 +348,7 @@ client_t* find_client_unlocked(const char *username, client_err_t *err)
 
 }
 
+// Find a Client
 client_t* find_client(const char *username, client_err_t *err)
 {
     pthread_mutex_lock(&registry_lock);
@@ -297,7 +358,50 @@ client_t* find_client(const char *username, client_err_t *err)
 
 }
 
+// Delete a Client
 void delete_client(client_t *client, client_err_t *err)
 {
+  pthread_mutex_lock(&registry_lock);
+
+    if(client == NULL)
+    {
+        *err = CLIENT_ERR_NULL;
+        pthread_mutex_unlock(&registry_lock);
+        return;
+    }
+
+    // Find the client's Index
+    int client_index = -1;
+    for(int i = 0; i < client_count; i++)
+    {
+        if(client_list[i] == client)
+        {
+            client_index = i;
+            break;
+        }
+    }
+
+    if(client_index == -1)
+    {
+        *err = CLIENT_ERR_NOT_FOUND;
+        pthread_mutex_unlock(&registry_lock);
+        return;
+    }
+
+    client_count -= 1;
+
+    // If any other position other than last one
+    if(client_index != client_count)
+    {
+        shift_array_room_list(client_list, client_index, client_count);
+    }
+
+    // Clean the array and free the malloc allocated memory
+    client_list[client_count] = NULL;
+    free(client);
+
+    pthread_mutex_unlock(&registry_lock);
+    *err = CLIENT_OK;
+    return;
 
 }
