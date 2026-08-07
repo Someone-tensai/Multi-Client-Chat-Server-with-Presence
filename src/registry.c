@@ -393,7 +393,7 @@ void delete_client(client_t *client, client_err_t *err)
     // If any other position other than last one
     if(client_index != client_count)
     {
-        shift_array_room_list(client_list, client_index, client_count);
+        shift_array_client_list(client_list, client_index, client_count);
     }
 
     // Clean the array and free the malloc allocated memory
