@@ -2,6 +2,28 @@
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
+// ENUM to recognise command type
+typedef enum {
+    TYPE_REGISTER,
+    TYPE_CREATE,
+    TYPE_JOIN,
+    TYPE_MSG,
+    TYPE_PM,
+    TYPE_WHO,
+    TYPE_ROOMS,
+    TYPE_LEAVE,
+    TYPE_INVALID   // unknown/malformed command
+} cmd_type;
+
+// Struct Used for Parsing and stuff
+
+typedef struct cmd
+{
+  cmd_type type;
+  char* arg1;
+  char* arg2;
+} cmd;
+
 // Maximum lengths of messages, usernames etc
 #define MAX_LINE_LEN 512
 #define MAX_USERNAME_LEN 32
@@ -34,8 +56,7 @@
 #define CMD_WHO "WHO"
 #define CMD_ROOMS "ROOMS"
 #define CMD_LEAVE "LEAVE"
-
-
+#define CMD_INVALID "INVALID"
 // Server -> Client 
 #define REPLY_OK "OK"
 #define REPLY_ERR "ERR"
@@ -73,5 +94,6 @@
 
 #define ERR_UNKNOWN_COMMAND "UNKNOWN_COMMAND"
 #define ERR_MALFORMED "MALFORMED"
+
 
 #endif
