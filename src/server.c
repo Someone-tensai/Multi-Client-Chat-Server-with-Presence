@@ -41,6 +41,7 @@ void run_server(int port)
     socklen_t size_address = sizeof(client_address);
     while(1)
     {
+        // Iterative Right now, multithreading later
         int client_fd = accept(server_fd, (struct sockaddr*)&client_address, &size_address);
         if(client_fd == -1)
         {
