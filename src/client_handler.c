@@ -184,7 +184,7 @@ void handle_client(int client_fd)
                                 format_ok_reply(reply, sizeof(reply), OK_JOINED);
                                 send(client_fd, reply, strlen(reply), 0);
 
-                                format_notice(reply, sizeof(reply), me->client_name , OK_JOINED , room->room_name);
+                                format_notice(reply, sizeof(reply), me->client_name , OK_JOINED , room_found->room_name);
                                 room_broadcast(room_found, reply, me->client_fd);
                                 break;
 

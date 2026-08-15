@@ -88,8 +88,7 @@ room_t* create_room(const char *room_name, client_t *creator_client, room_err_t 
     strncpy(new_room->room_name, room_name, MAX_ROOM_NAME_LEN);
     new_room->room_name[MAX_ROOM_NAME_LEN-1] = '\0';
     new_room->admin_client = creator_client;
-    new_room->member_count = 1;
-    new_room->members[0] = creator_client;
+    new_room->member_count = 0;
 
     // Add the room to the global room list
     room_list[room_count++] = new_room;
