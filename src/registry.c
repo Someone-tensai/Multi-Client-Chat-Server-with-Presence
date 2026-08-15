@@ -18,6 +18,12 @@ int client_count = 0;
 // Find a Room (Unlocked to be wrapped by functions with mutex locks)
 room_t *find_room_unlocked(const char* room_name, room_err_t *err)
 {
+    // Invalid Room Name
+    if(room_name == NULL || strlen(room_name) == 0 || strlen(room_name) >= MAX_ROOM_NAME_LEN)
+    {
+        *err = ROOM_ERR_INVALID_NAME;
+        return NULL;
+    }
     // Loop Through All Rooms and Compare their Names
     for(int i = 0; i < room_count ; i++)
     {
@@ -35,6 +41,12 @@ room_t *find_room_unlocked(const char* room_name, room_err_t *err)
 room_t* create_room(const char *room_name, client_t *creator_client, room_err_t *err)
 {
 
+    // If Creator Client is NULL
+    if(creator_client == NULL)
+    {
+        *err = ROOM_ERR_INVALID_CLIENT;
+        return NULL;
+    }
     // If length of room name is more than allowed
     size_t len = strlen(room_name);
     if(len == 0 || len >= MAX_ROOM_NAME_LEN)
@@ -76,8 +88,7 @@ room_t* create_room(const char *room_name, client_t *creator_client, room_err_t 
     strncpy(new_room->room_name, room_name, MAX_ROOM_NAME_LEN);
     new_room->room_name[MAX_ROOM_NAME_LEN-1] = '\0';
     new_room->admin_client = creator_client;
-    new_room->member_count = 1;
-    new_room->members[0] = creator_client;
+    new_room->member_count = 0;
 
     // Add the room to the global room list
     room_list[room_count++] = new_room;

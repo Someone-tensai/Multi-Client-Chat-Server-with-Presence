@@ -7,7 +7,7 @@
 // Function to Parse Incoming commands
 // Takes a raw string and splits it into
 // Command - The Command to Run
-// Arguments - Thhe Arguemnts with the Command
+// Arguments - Thhe Arguments with the Command
 cmd parse_incoming_command_server(char* line)
 {
     char delim[] = " ";

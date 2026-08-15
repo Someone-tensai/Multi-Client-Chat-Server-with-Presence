@@ -2,6 +2,7 @@
 #define SERVER_H
 
 #include "common.h"
+#include<sys/socket.h>
 
 #define BACKLOG 10
 // Function Declarations
