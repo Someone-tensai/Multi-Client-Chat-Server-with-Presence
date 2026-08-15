@@ -2,6 +2,8 @@
 #include <string.h>
 #include <stdio.h>
 
+// Clientt Side Parsing to be Implemented by Another Person
+
 // Function to Parse Incoming commands
 // Takes a raw string and splits it into
 // Command - The Command to Run
