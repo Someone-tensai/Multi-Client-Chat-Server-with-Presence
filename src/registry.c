@@ -47,6 +47,12 @@ room_t* create_room(const char *room_name, client_t *creator_client, room_err_t 
         *err = ROOM_ERR_INVALID_CLIENT;
         return NULL;
     }
+
+    if(room_name == NULL)
+    {
+        *err = ROOM_ERR_INVALID_NAME;
+        return NULL;
+    }
     // If length of room name is more than allowed
     size_t len = strlen(room_name);
     if(len == 0 || len >= MAX_ROOM_NAME_LEN)
@@ -89,7 +95,8 @@ room_t* create_room(const char *room_name, client_t *creator_client, room_err_t 
     new_room->room_name[MAX_ROOM_NAME_LEN-1] = '\0';
     new_room->admin_client = creator_client;
     new_room->member_count = 0;
-
+    new_room->history_count = 0;
+    new_room->history[history_count] = NULL;
     // Add the room to the global room list
     room_list[room_count++] = new_room;
 
@@ -125,6 +132,11 @@ void room_add_member(room_t *room, client_t *client, room_err_t *err)
         return;
     }
 
+    if(client->current_room != NULL)
+    {
+        *err = ROOM_ERR_ALREADY_IN_A_ROOM;
+        return;
+    }
     pthread_mutex_lock(&registry_lock);
     // Check if Max Members Reached
     if(room->member_count >= MAX_MEMBERS)
@@ -205,6 +217,7 @@ void room_remove_member(room_t *room, client_t *client, room_err_t *err)
         return;
     }
     // If Removing from end , this is enough
+    
     room->member_count -= 1;
 
     // If Removing from anywhere else
@@ -213,7 +226,7 @@ void room_remove_member(room_t *room, client_t *client, room_err_t *err)
         // Shift them one step back from where they are deleted
         shift_array_room(room, client_index , room->member_count);
     }
-    
+    room->members[member_count] = NULL;
     pthread_mutex_unlock(&registry_lock);
     *err = ROOM_OK;
     return;
@@ -345,6 +358,12 @@ client_t *create_client(int socket_fd, const char* client_name, client_err_t *er
 // Find a Client (Unlocked to be wrapped by others)
 client_t* find_client_unlocked(const char *username, client_err_t *err)
 {
+
+    if(username == NULL)
+    {
+        *err = CLIENT_ERR_INVALID_NAME;
+        return NULL;
+    }
     // Loop Through All Made Clients and Compare their IDs
     for(int i = 0; i < client_count ; i++)
     {

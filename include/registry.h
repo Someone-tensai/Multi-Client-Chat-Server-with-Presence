@@ -21,6 +21,7 @@ typedef enum {
     ROOM_OK = 0,
     ROOM_ERR_INVALID_NAME,
     ROOM_ERR_ALREADY_EXISTS,
+    ROOM_ERR_ALREADY_IN_A_ROOM,
     ROOM_ERR_MAX_ROOMS,
     ROOM_ERR_ALLOC_FAILED,
     ROOM_ERR_MEMBER_NOT_IN_ROOM,
@@ -60,8 +61,6 @@ typedef struct room_t {
 
     message_t history[HISTORY_SIZE];
     int history_count;
-    int history_next;
-
 } room_t;
 
 // Client Definition

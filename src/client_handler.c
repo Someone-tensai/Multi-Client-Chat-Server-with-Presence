@@ -103,7 +103,7 @@ void handle_client(int client_fd)
                         {
                             case ROOM_OK:
                                 me->current_room = new_room;
-                                format_ok_reply(reply, sizeof(reply), OK_JOINED);
+                                format_ok_reply(reply, sizeof(reply), OK_CREATED);
                                 send(client_fd, reply, strlen(reply), 0);
                                 break;
 
@@ -172,6 +172,32 @@ void handle_client(int client_fd)
                     break;
                 }
 
+                if(me->current_room != NULL)
+                {
+                    already_in = me -> current_room;
+                    room_remove_member(already_in, me, &room_err);
+                    switch(room_err)
+                    {
+                        case ROOM_OK:
+                            me->current_room = NULL;
+                            break;
+
+                        case ROOM_ERR_NULL:
+                            format_err_reply(reply, sizeof(reply), ERR_ROOM_NULL);
+                            send(client_fd, reply, strlen(reply), 0);
+                            break;
+
+                        case ROOM_ERR_INVALID_CLIENT:
+                            format_err_reply(reply, sizeof(reply), ERR_INVALID_CLIENT);
+                            send(client_fd, reply, strlen(reply), 0);
+                            break;
+
+                        case ROOM_ERR_CLIENT_NOT_FOUND:
+                            format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                            send(client_fd, reply, strlen(reply), 0);
+                            break;
+                    }
+                }
                 room_t *room_found = find_room(room_name, &room_err);
                 switch(room_err)
                 {
@@ -200,6 +226,11 @@ void handle_client(int client_fd)
 
                             case ROOM_ERR_MAX_MEMBERS:
                                 format_err_reply(reply, sizeof(reply), ERR_MAX_MEMBER_COUNT_REACHED);
+                                send(client_fd, reply, strlen(reply), 0);
+                                break;
+                            
+                            case ROOM_ERR_ALREADY_IN_A_ROOM:
+                                format_err_reply(reply, sizeof(reply), ERR_ALREADY_IN_A_ROOM);
                                 send(client_fd, reply, strlen(reply), 0);
                                 break;
 
@@ -256,5 +287,10 @@ void handle_client(int client_fd)
             }     
         }
     }
-}
+    }
+    // Cleanup after  disconnection
+    // Remove member from room
+    // Delete the Client
+    // Close the client fd
+    // Notice to other clients
 }
