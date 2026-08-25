@@ -1,11 +1,19 @@
 #include "../include/server.h"
 #include "../include/registry.h"
+#include <pthread.h>
+#include <stdint.h>
 
 int main()
 {
     run_server(DEFAULT_PORT);
 }
 
+void *handle_client_thread(void *arg)
+{
+    int client_fd = (int)(intptr_t)arg;
+    handle_client(client_fd);  //call existing function in client_handler.c
+    return NULL;
+} 
 void run_server(int port)
 {
     int server_fd;
@@ -41,14 +49,22 @@ void run_server(int port)
     socklen_t size_address = sizeof(client_address);
     while(1)
     {
-        // Iterative Right now, multithreading later
+        
         int client_fd = accept(server_fd, (struct sockaddr*)&client_address, &size_address);
+
         if(client_fd == -1)
         {
             perror("Error Connecting to Client");
             continue;
         }
-        handle_client(client_fd);
+        pthread_t tid ;
+        if (pthread_create(&tid,NULL, handle_client_thread, (void*)(intptr_t)client_fd)!=0)
+        {
+            perror("Thread creation failed");
+            close(client_fd);
+            continue;
+        }
+        pthread_detach(tid);
     }
 
 }
