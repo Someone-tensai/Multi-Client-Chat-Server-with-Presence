@@ -48,6 +48,21 @@ cmd parse_incoming_command_server(char* line)
         incoming_command.type = TYPE_LEAVE;
         incoming_command.arg1 = strtok(NULL, delim);
     }
+    else if (strcmp(command, CMD_KICK) == 0)
+    {
+        incoming_command.type = TYPE_KICK;
+        incoming_command.arg1 = strtok(NULL, delim);  // target username
+    }
+    else if (strcmp(command, CMD_PROMOTE) == 0)
+    {
+        incoming_command.type = TYPE_PROMOTE;
+        incoming_command.arg1 = strtok(NULL, delim);  // target username
+    }
+    else if (strcmp(command, CMD_STATUS) == 0)
+    {
+        incoming_command.type = TYPE_STATUS;
+        incoming_command.arg1 = strtok(NULL, delim);  // ONLINE | AWAY | BUSY
+    }
     else if (strcmp(command, CMD_MSG) == 0)
     {
         incoming_command.type = TYPE_MSG;

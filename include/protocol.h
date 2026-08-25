@@ -12,6 +12,9 @@ typedef enum {
     TYPE_WHO,
     TYPE_ROOMS,
     TYPE_LEAVE,
+    TYPE_KICK,
+    TYPE_PROMOTE,
+    TYPE_STATUS,
     TYPE_INVALID   // unknown/malformed command
 } cmd_type;
 
@@ -56,6 +59,9 @@ typedef struct cmd
 #define CMD_WHO "WHO"
 #define CMD_ROOMS "ROOMS"
 #define CMD_LEAVE "LEAVE"
+#define CMD_KICK "KICK"
+#define CMD_PROMOTE "PROMOTE"
+#define CMD_STATUS "STATUS"
 #define CMD_INVALID "INVALID"
 // Server -> Client 
 #define REPLY_OK "OK"
@@ -66,16 +72,25 @@ typedef struct cmd
 #define REPLY_WHO "WHO_REPLY"
 #define REPLY_ROOMS "ROOMS_REPLY"
 
+// Presence status values (used in STATUS command and WHO reply)
+#define STATUS_ONLINE "ONLINE"
+#define STATUS_AWAY   "AWAY"
+#define STATUS_BUSY   "BUSY"
+
 // If the command succeded
 #define OK_REGISTERED "REGISTERED"
 #define OK_CREATED "CREATED"
 #define OK_JOINED "JOINED"
 #define OK_LEFT "LEFT"
 #define OK_SENT "SENT"
+#define OK_KICKED "KICKED"
+#define OK_PROMOTED "PROMOTED"
+#define OK_STATUS_SET "STATUS_SET"
 
 // If there was an error
 
 #define ERR_SERVER_ERROR "SERVER_ERROR"
+#define ERR_SERVER_SHUTDOWN "SERVER_SHUTDOWN"
 #define ERR_INVALID_COMMAND "INVALID_COMMAND"
 
 #define ERR_USERNAME_TAKEN "USERNAME_TAKEN"
@@ -95,6 +110,11 @@ typedef struct cmd
 #define ERR_ROOM_NULL "ROOM_NULL"
 #define ERR_ROOM_MAX_MEMBER_COUNT_REACHED "ROOM_MAX_MEMBERS_REACHED"
 #define ERR_ALREADY_IN_A_ROOM "ALREADY_IN_A_ROOM"
+#define ERR_NOT_ADMIN "NOT_ADMIN"
+#define ERR_CANNOT_KICK_SELF "CANNOT_KICK_SELF"
+#define ERR_USER_NOT_IN_ROOM "USER_NOT_IN_ROOM"
+#define ERR_INVALID_STATUS "INVALID_STATUS"
+#define ERR_RATE_LIMITED "RATE_LIMITED"
 
 #define ERR_EMPTY_MESSAGE "EMPTY_MESSAGE"
 #define ERR_LINE_TOO_LONG "LINE_TOO_LONG"
