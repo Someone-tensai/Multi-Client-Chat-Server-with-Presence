@@ -4,6 +4,107 @@ This document is for whoever picks this project up next. It covers the current s
 
 ---
 
+## Team Division — Sulav, Srijal, Janak
+
+The six scaling tasks below are split so that each person works on completely separate files and layers. There is no overlap — you will not conflict on the same file at the same time.
+
+### Sulav — Infrastructure & Transport Layer
+
+**Tasks: epoll-based I/O + TLS encryption**
+
+These are both low-level server infrastructure tasks that live entirely in `src/server.c`, `src/threadpool.c`, and the socket call sites in `src/client_handler.c` and `src/registry.c`.
+
+| Task | Files to touch |
+|---|---|
+| epoll-based I/O | `src/server.c`, `src/threadpool.c`, `include/threadpool.h` |
+| TLS (OpenSSL) | `src/server.c`, `replies/client.c`, wrapper around `send`/`recv` in `src/client_handler.c` and `src/registry.c` |
+
+**Branch:** `feature/sulav-infra`
+
+Do epoll first, then TLS on top. epoll changes how connections are accepted and dispatched. TLS wraps the socket calls — once epoll is in, the send/recv sites are clear and TLS slots in without touching logic.
+
+Do **not** touch `src/registry.c` logic, `src/protocol.c`, or anything in `include/registry.h` — those are Srijal and Janak's territory.
+
+---
+
+### Srijal — Data & Persistence Layer
+
+**Tasks: Persistent message history (SQLite) + User authentication**
+
+These are both data storage tasks. Everything lives in `src/registry.c`, a new `src/db.c` / `include/db.h`, and `src/client_handler.c` (only the REGISTER case for auth).
+
+| Task | Files to touch |
+|---|---|
+| SQLite persistence | New `src/db.c`, new `include/db.h`, `src/registry.c` (`room_add_history`, `room_send_history`, `create_room`) |
+| User authentication | `src/db.c` (store hashed passwords), `src/client_handler.c` (TYPE_REGISTER and a new TYPE_LOGIN case), `include/protocol.h` (add `CMD_LOGIN`, `TYPE_LOGIN`) |
+
+**Branch:** `feature/srijal-persistence`
+
+Add SQLite first — schema:
+```sql
+CREATE TABLE messages (room TEXT, sender TEXT, text TEXT, timestamp INTEGER);
+CREATE TABLE users    (username TEXT PRIMARY KEY, password_hash TEXT);
+```
+
+Then add auth on top using the same DB connection. The `registry_lock` rwlock already protects `client_list` — you do not need to add new locks, just wrap DB calls in their own mutex inside `db.c`.
+
+Do **not** touch `src/server.c`, `src/threadpool.c`, or `src/display.c` — those are Sulav and Janak's territory.
+
+---
+
+### Janak — Application & Config Layer
+
+**Tasks: Config file + Dynamic thread pool**
+
+These are application-level changes. Config touches startup only (`src/server.c` main entry, a new `src/config.c`). Dynamic pool is self-contained in `src/threadpool.c` and `include/threadpool.h`.
+
+| Task | Files to touch |
+|---|---|
+| Config file (`server.conf`) | New `src/config.c`, new `include/config.h`, `src/server.c` (read config at startup) |
+| Dynamic thread pool | `src/threadpool.c`, `include/threadpool.h` |
+
+**Branch:** `feature/janak-config-pool`
+
+Do config first — parse key=value pairs at startup and override the `#define` constants. Example `server.conf`:
+```
+port = 8888
+thread_pool_size = 16
+max_clients = 64
+rate_bucket_max = 5
+rate_refill_rate = 1.0
+```
+
+Then do the dynamic pool — add idle tracking, a high-water threshold to spawn workers, and a timeout to shrink. The pool is already isolated in `threadpool.c` so this will not touch any other file.
+
+Do **not** touch `src/registry.c`, `src/client_handler.c`, or `src/protocol.c` — those are Srijal's territory.
+
+---
+
+### Summary Table
+
+| Person | Branch | Files owned | Tasks |
+|---|---|---|---|
+| **Sulav** | `feature/sulav-infra` | `src/server.c`, `src/threadpool.c`, TLS wrappers | epoll, TLS |
+| **Srijal** | `feature/srijal-persistence` | `src/registry.c`, `src/db.c`, `include/db.h` | SQLite history, auth |
+| **Janak** | `feature/janak-config-pool` | `src/config.c`, `include/config.h`, `src/threadpool.c` | Config file, dynamic pool |
+
+> **Note:** Sulav and Janak both touch `src/threadpool.c`. Coordinate on this — Janak owns the dynamic pool logic, Sulav only changes how the pool is *called* from `src/server.c`. As long as Sulav does not modify `threadpool.c` internals and Janak does not modify `server.c`, there is no conflict.
+
+---
+
+### Integration Order
+
+To avoid merge conflicts when all three branches come together:
+
+1. **Janak merges first** — config and pool changes are foundational, no one depends on them
+2. **Srijal merges second** — persistence and auth sit on top of stable registry and config
+3. **Sulav merges last** — epoll and TLS are transport-level and wrap everything else
+
+Each person should rebase onto `main` before opening their PR.
+
+---
+
+
 ## How to Build and Run
 
 **Requirements:** Linux or WSL (Ubuntu), gcc, make, pthreads (included with glibc)
