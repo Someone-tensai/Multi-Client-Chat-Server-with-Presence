@@ -317,6 +317,26 @@ void delete_room(room_t *room, room_err_t *err)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Room — delete only if it has no members left
+// Safe to call after every room_remove_member without extra checks in callers.
+// ─────────────────────────────────────────────────────────────────────────────
+void room_delete_if_empty(room_t *room)
+{
+    if (room == NULL) return;
+
+    // Check member count under the room's own lock
+    pthread_mutex_lock(&room->room_lock);
+    int empty = (room->member_count == 0);
+    pthread_mutex_unlock(&room->room_lock);
+
+    if (empty)
+    {
+        room_err_t err;
+        delete_room(room, &err);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Client — find (unlocked, caller must hold at least rdlock on registry_lock)
 // ─────────────────────────────────────────────────────────────────────────────
 client_t *find_client_unlocked(const char *username, client_err_t *err)

@@ -311,6 +311,9 @@ void handle_client(int client_fd)
                 // Notify everyone still in the room
                 format_notice(reply, sizeof(reply), me->client_name, OK_LEFT, leaving_room->room_name);
                 room_broadcast(leaving_room, reply, client_fd);
+
+                // Clean up the room if it is now empty
+                room_delete_if_empty(leaving_room);
                 break;
             }
 
@@ -389,6 +392,9 @@ void handle_client(int client_fd)
                 // Confirm to admin
                 format_ok_reply(reply, sizeof(reply), OK_KICKED);
                 send(client_fd, reply, strlen(reply), 0);
+
+                // Clean up the room if it is now empty
+                room_delete_if_empty(kicked_from);
                 break;
             }
 
@@ -637,6 +643,9 @@ void handle_client(int client_fd)
             // Notify remaining members
             format_notice(reply, sizeof(reply), me->client_name, OK_LEFT, last_room->room_name);
             room_broadcast(last_room, reply, client_fd);
+
+            // Clean up the room if it is now empty
+            room_delete_if_empty(last_room);
         }
 
         // Remove client from the global registry

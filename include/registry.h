@@ -102,6 +102,7 @@ void room_broadcast(room_t *room, const char *msg, int exclude_fd);
 void room_add_history(room_t *room, const char *sender, const char *text);
 void room_send_history(room_t *room, int fd);
 void delete_room(room_t *room, room_err_t *err);
+void room_delete_if_empty(room_t *room);
 
 client_t *create_client(int socket_fd, const char* client_name, client_err_t *err);
 client_t *find_client_unlocked(const char *username, client_err_t *err);
