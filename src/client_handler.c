@@ -117,6 +117,7 @@ void handle_client(int client_fd)
                                 me->current_room = new_room;
                                 format_ok_reply(reply, sizeof(reply), OK_CREATED);
                                 send(client_fd, reply, strlen(reply), 0);
+                                // No history yet in a brand-new room
                                 break;
 
                             case ROOM_ERR_NULL:
@@ -227,6 +228,9 @@ void handle_client(int client_fd)
                                 format_ok_reply(reply, sizeof(reply), OK_JOINED);
                                 send(client_fd, reply, strlen(reply), 0);
 
+                                // Replay message history for the joining client
+                                room_send_history(room_found, client_fd);
+
                                 format_notice(reply, sizeof(reply), me->client_name , OK_JOINED , room_found->room_name);
                                 room_broadcast(room_found, reply, me->socket_fd);
                                 break;
@@ -310,6 +314,142 @@ void handle_client(int client_fd)
                 break;
             }
 
+        case TYPE_KICK:
+            {
+                // Must be in a room
+                if(me->current_room == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Must be the admin
+                if(me->current_room->admin_client != me)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_NOT_ADMIN);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                char *target_name = command.arg1;
+                if(target_name == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Cannot kick yourself
+                if(strcmp(target_name, me->client_name) == 0)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_CANNOT_KICK_SELF);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Find target in the global registry
+                client_err_t kick_err;
+                client_t *target = find_client(target_name, &kick_err);
+                if(target == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_UNKNOWN_USER);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Target must be in the same room
+                if(target->current_room != me->current_room)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_USER_NOT_IN_ROOM);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                room_t *kicked_from = me->current_room;
+
+                // Remove target from the room
+                room_remove_member(kicked_from, target, &room_err);
+                if(room_err != ROOM_OK)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+                target->current_room = NULL;
+
+                // Tell the kicked user what happened
+                format_err_reply(reply, sizeof(reply), OK_KICKED);
+                send(target->socket_fd, reply, strlen(reply), 0);
+
+                // Notify the whole room
+                format_notice(reply, sizeof(reply), target_name, OK_KICKED, kicked_from->room_name);
+                room_broadcast(kicked_from, reply, target->socket_fd);
+
+                // Confirm to admin
+                format_ok_reply(reply, sizeof(reply), OK_KICKED);
+                send(client_fd, reply, strlen(reply), 0);
+                break;
+            }
+
+        case TYPE_PROMOTE:
+            {
+                // Must be in a room
+                if(me->current_room == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Must be the current admin
+                if(me->current_room->admin_client != me)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_NOT_ADMIN);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                char *target_name = command.arg1;
+                if(target_name == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Find target
+                client_err_t promo_err;
+                client_t *target = find_client(target_name, &promo_err);
+                if(target == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_UNKNOWN_USER);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Target must be in the same room
+                if(target->current_room != me->current_room)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_USER_NOT_IN_ROOM);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Transfer admin
+                me->current_room->admin_client = target;
+
+                // Tell the new admin
+                format_ok_reply(reply, sizeof(reply), OK_PROMOTED);
+                send(target->socket_fd, reply, strlen(reply), 0);
+
+                // Notify the whole room
+                format_notice(reply, sizeof(reply), target_name, OK_PROMOTED, me->current_room->room_name);
+                room_broadcast(me->current_room, reply, -1);  // -1 = send to everyone incl. old admin
+
+                break;
+            }
+
         case TYPE_MSG:
             {
                 // Must be in a room to send a message
@@ -331,6 +471,9 @@ void handle_client(int client_fd)
                 // Broadcast the message to everyone else in the room
                 format_msg_reply(reply, sizeof(reply), me->client_name, text);
                 room_broadcast(me->current_room, reply, client_fd);
+
+                // Save to room history so late joiners can catch up
+                room_add_history(me->current_room, me->client_name, text);
 
                 // Confirm to sender
                 format_ok_reply(reply, sizeof(reply), OK_SENT);
@@ -383,16 +526,64 @@ void handle_client(int client_fd)
                 char rooms_buf[MAX_LINE_LEN];
                 int offset = snprintf(rooms_buf, sizeof(rooms_buf), "%s", REPLY_ROOMS);
 
-                pthread_mutex_lock(&registry_lock);
+                pthread_rwlock_rdlock(&registry_lock);
                 for(int i = 0; i < room_count; i++)
                 {
                     offset += snprintf(rooms_buf + offset, sizeof(rooms_buf) - offset,
                                        " %s", room_list[i]->room_name);
                 }
-                pthread_mutex_unlock(&registry_lock);
+                pthread_rwlock_unlock(&registry_lock);
 
                 snprintf(rooms_buf + offset, sizeof(rooms_buf) - offset, "\n");
                 send(client_fd, rooms_buf, strlen(rooms_buf), 0);
+                break;
+            }
+
+        case TYPE_STATUS:
+            {
+                char *new_status = command.arg1;
+                if(new_status == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                presence_status_t prev = me->status;
+                const char *status_str;
+
+                if(strcmp(new_status, STATUS_ONLINE) == 0)
+                {
+                    me->status = PRESENCE_ONLINE;
+                    status_str = STATUS_ONLINE;
+                }
+                else if(strcmp(new_status, STATUS_AWAY) == 0)
+                {
+                    me->status = PRESENCE_AWAY;
+                    status_str = STATUS_AWAY;
+                }
+                else if(strcmp(new_status, STATUS_BUSY) == 0)
+                {
+                    me->status = PRESENCE_BUSY;
+                    status_str = STATUS_BUSY;
+                }
+                else
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_INVALID_STATUS);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Confirm to client
+                format_ok_reply(reply, sizeof(reply), OK_STATUS_SET);
+                send(client_fd, reply, strlen(reply), 0);
+
+                // Notify room if the status actually changed and client is in one
+                if(me->current_room != NULL && prev != me->status)
+                {
+                    format_notice(reply, sizeof(reply), me->client_name, status_str, me->current_room->room_name);
+                    room_broadcast(me->current_room, reply, client_fd);
+                }
                 break;
             }
 
@@ -406,18 +597,24 @@ void handle_client(int client_fd)
                     break;
                 }
 
-                // Build a list of all usernames in the room
+                // Build list: WHO_REPLY <name>/<status> <name>/<status> ...
                 char who_buf[MAX_LINE_LEN];
                 int offset = snprintf(who_buf, sizeof(who_buf), "%s", REPLY_WHO);
 
-                pthread_mutex_lock(&registry_lock);
+                pthread_mutex_lock(&me->current_room->room_lock);
                 room_t *cur_room = me->current_room;
                 for(int i = 0; i < cur_room->member_count; i++)
                 {
+                    client_t *m = cur_room->members[i];
+                    const char *s = (m->status == PRESENCE_AWAY)  ? STATUS_AWAY  :
+                                    (m->status == PRESENCE_BUSY)  ? STATUS_BUSY  :
+                                                                     STATUS_ONLINE;
+                    // Mark the admin with a * prefix
+                    const char *admin_mark = (cur_room->admin_client == m) ? "*" : "";
                     offset += snprintf(who_buf + offset, sizeof(who_buf) - offset,
-                                       " %s", cur_room->members[i]->client_name);
+                                       " %s%s/%s", admin_mark, m->client_name, s);
                 }
-                pthread_mutex_unlock(&registry_lock);
+                pthread_mutex_unlock(&me->current_room->room_lock);
 
                 snprintf(who_buf + offset, sizeof(who_buf) - offset, "\n");
                 send(client_fd, who_buf, strlen(who_buf), 0);

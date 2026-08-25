@@ -52,6 +52,12 @@ static void handle_server_line(char *line)
             display_system("Left the room.");
             current_room[0] = '\0';
         }
+        else if (strcmp(status, OK_KICKED) == 0)
+            display_system("User kicked.");
+        else if (strcmp(status, OK_PROMOTED) == 0)
+            display_system("User promoted to admin.");
+        else if (strcmp(status, OK_STATUS_SET) == 0)
+            display_system("Status updated.");
         else if (strcmp(status, OK_SENT) == 0)
         {
             // Silent — no need to echo "sent" back to user
@@ -68,7 +74,16 @@ static void handle_server_line(char *line)
     else if (strcmp(first, REPLY_ERR) == 0)
     {
         char *code = next_token(&rest, " ");
-        display_error(code ? code : "UNKNOWN");
+        // Special case: server sends ERR KICKED when the client is the one being kicked
+        if (code && strcmp(code, OK_KICKED) == 0)
+        {
+            display_system("You have been kicked from the room.");
+            current_room[0] = '\0';
+        }
+        else
+        {
+            display_error(code ? code : "UNKNOWN");
+        }
     }
 
     // ── NOTICE <user> <action> <room> ─────────
@@ -81,17 +96,49 @@ static void handle_server_line(char *line)
         if (user && action && room)
         {
             char buf[256];
-            // Track current room from NOTICE so MSG display has the room name
-            if (strcmp(action, OK_JOINED) == 0)
+
+            // History separator — keep out of the join/leave flow
+            if (strcmp(user, "history") == 0)
             {
-                snprintf(buf, sizeof(buf), "%s joined %s", user, room);
+                if (strcmp(action, "START") == 0)
+                    snprintf(buf, sizeof(buf), "--- last messages in %s ---", room);
+                else
+                    snprintf(buf, sizeof(buf), "--- end of history ---");
+                display_system(buf);
+            }
+            else if (strcmp(action, OK_JOINED) == 0)
+            {
                 strncpy(current_room, room, MAX_ROOM_NAME_LEN - 1);
+                snprintf(buf, sizeof(buf), "%s joined %s", user, room);
+                display_notice(buf);
+            }
+            else if (strcmp(action, OK_LEFT) == 0)
+            {
+                snprintf(buf, sizeof(buf), "%s left %s", user, room);
+                display_notice(buf);
+            }
+            else if (strcmp(action, OK_KICKED) == 0)
+            {
+                snprintf(buf, sizeof(buf), "%s was kicked from %s", user, room);
+                display_notice(buf);
+            }
+            else if (strcmp(action, OK_PROMOTED) == 0)
+            {
+                snprintf(buf, sizeof(buf), "%s is now admin of %s", user, room);
+                display_notice(buf);
+            }
+            else if (strcmp(action, STATUS_ONLINE) == 0 ||
+                     strcmp(action, STATUS_AWAY)   == 0 ||
+                     strcmp(action, STATUS_BUSY)   == 0)
+            {
+                snprintf(buf, sizeof(buf), "%s is now %s", user, action);
+                display_notice(buf);
             }
             else
             {
-                snprintf(buf, sizeof(buf), "%s left %s", user, room);
+                snprintf(buf, sizeof(buf), "%s %s %s", user, action, room);
+                display_notice(buf);
             }
-            display_notice(buf);
         }
     }
 
@@ -113,15 +160,31 @@ static void handle_server_line(char *line)
             display_pm(sender, text);
     }
 
-    // ── WHO_REPLY <user1> <user2> ... ─────────
+    // ── WHO_REPLY <name>/<status> ... ─────────
+    // Admin is prefixed with *
     else if (strcmp(first, REPLY_WHO) == 0)
     {
-        char buf[MAX_LINE_LEN] = "Users in room:";
-        char *name;
-        while ((name = next_token(&rest, " ")) != NULL)
+        char buf[MAX_LINE_LEN];
+        int  off = snprintf(buf, sizeof(buf), "Users in room:");
+        char *entry;
+        while ((entry = next_token(&rest, " ")) != NULL)
         {
-            strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
-            strncat(buf, name, sizeof(buf) - strlen(buf) - 1);
+            // entry is like "alice/ONLINE" or "*bob/AWAY"
+            int is_admin = (entry[0] == '*');
+            char *name   = is_admin ? entry + 1 : entry;
+            char *slash  = strchr(name, '/');
+            if (slash)
+            {
+                *slash = '\0';
+                char *st = slash + 1;
+                off += snprintf(buf + off, sizeof(buf) - off,
+                                is_admin ? " [*%s/%s]" : " [%s/%s]", name, st);
+            }
+            else
+            {
+                off += snprintf(buf + off, sizeof(buf) - off,
+                                is_admin ? " [*%s]" : " [%s]", name);
+            }
         }
         display_system(buf);
     }
@@ -190,6 +253,9 @@ static void print_help(void)
     display_system("  PM <user> <text>     - send private message");
     display_system("  WHO                  - list users in room");
     display_system("  ROOMS                - list all rooms");
+    display_system("  KICK <user>          - kick a user (admin only)");
+    display_system("  PROMOTE <user>       - make a user admin (admin only)");
+    display_system("  STATUS <ONLINE|AWAY|BUSY> - set your presence status");
     display_system("  /help                - show this help");
     display_system("  /quit                - disconnect and exit");
 }

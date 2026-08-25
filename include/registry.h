@@ -60,19 +60,30 @@ typedef struct room_t {
     client_t* admin_client;
 
     message_t history[HISTORY_SIZE];
-    int history_count;
+    int history_count;       // total messages ever added (not capped)
+    int history_start;       // index of oldest message in circular buffer
+
+    pthread_mutex_t room_lock; // protects members[], history[] for this room only
 } room_t;
+
+// Presence status for a connected client
+typedef enum {
+    PRESENCE_ONLINE = 0,
+    PRESENCE_AWAY,
+    PRESENCE_BUSY
+} presence_status_t;
 
 // Client Definition
 typedef struct client_t {
     int socket_fd;
     char client_name[MAX_USERNAME_LEN];
     room_t* current_room;
-
+    presence_status_t status;   // online / away / busy
 }client_t;
 
-// Mutex Lock to protect all room and member states from race conditions
-extern pthread_mutex_t registry_lock;
+// Global rwlock — protects room_list[] and client_list[] arrays only.
+// Per-room operations use room->room_lock instead.
+extern pthread_rwlock_t registry_lock;
 
 // Room List and Count
 extern room_t *room_list[MAX_ROOMS];
@@ -88,6 +99,8 @@ room_t *find_room_unlocked(const char* room_name, room_err_t *err);
 void room_add_member(room_t *room, client_t *client, room_err_t *err);
 void room_remove_member(room_t *room, client_t *client, room_err_t *err);
 void room_broadcast(room_t *room, const char *msg, int exclude_fd);
+void room_add_history(room_t *room, const char *sender, const char *text);
+void room_send_history(room_t *room, int fd);
 void delete_room(room_t *room, room_err_t *err);
 
 client_t *create_client(int socket_fd, const char* client_name, client_err_t *err);
