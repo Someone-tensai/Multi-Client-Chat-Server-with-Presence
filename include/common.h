@@ -6,6 +6,9 @@
 #include<string.h>
 #include<unistd.h>
 #include<errno.h>
+#include<sys/socket.h>
+#include<netinet/in.h>
+#include<arpa/inet.h>
 
 // Default Port to Connect To
 #define DEFAULT_PORT 8888

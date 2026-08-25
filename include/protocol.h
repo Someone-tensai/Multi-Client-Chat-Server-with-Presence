@@ -102,5 +102,13 @@ typedef struct cmd
 #define ERR_UNKNOWN_COMMAND "UNKNOWN_COMMAND"
 #define ERR_MALFORMED "MALFORMED"
 
+// Function Declarations
+#include <stddef.h>
+cmd parse_incoming_command_server(char *line);
+void format_ok_reply(char *out, size_t out_size, const char *status);
+void format_err_reply(char *out, size_t out_size, const char *err_code);
+void format_notice(char *out, size_t out_size, const char *user, const char *action, const char *room);
+void format_msg_reply(char *out, size_t out_size, const char *sender, const char *text);
+void format_pm_reply(char *out, size_t out_size, const char *sender, const char *text);
 
 #endif

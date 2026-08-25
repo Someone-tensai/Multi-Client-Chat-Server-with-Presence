@@ -54,12 +54,11 @@ void display_error(const char *err_code)
     pthread_mutex_unlock(&screen_lock);
 }
 
-int main(){
-    display_message("Room 1", "User1", "This is a message");
-    display_message("Room 1", "User2", "YOYOYO");
-    display_message("Room 1", "User3", "Whats uppp");
-
-    display_notice("YOU ARE GAY");
-    display_error("SPIDERMAN NOT FOUND");
-    display_pm("User2", "ARA ARA U CHEATING ON ME?");
+void display_system(const char *text)
+{
+    pthread_mutex_lock(&screen_lock);
+    print_timestamp();
+    printf(COLOR_YELLOW "[system] %s" COLOR_RESET "\n", text);
+    pthread_mutex_unlock(&screen_lock);
 }
+
