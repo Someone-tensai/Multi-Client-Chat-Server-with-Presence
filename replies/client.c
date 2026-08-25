@@ -80,6 +80,15 @@ static void handle_server_line(char *line)
             display_system("You have been kicked from the room.");
             current_room[0] = '\0';
         }
+        else if (code && strcmp(code, ERR_SERVER_SHUTDOWN) == 0)
+        {
+            display_system("Server is shutting down. Goodbye.");
+            running = 0;
+        }
+        else if (code && strcmp(code, ERR_RATE_LIMITED) == 0)
+        {
+            display_error("Slow down — you are sending messages too fast.");
+        }
         else
         {
             display_error(code ? code : "UNKNOWN");

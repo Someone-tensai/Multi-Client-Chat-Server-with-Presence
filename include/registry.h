@@ -73,13 +73,22 @@ typedef enum {
     PRESENCE_BUSY
 } presence_status_t;
 
+// Rate limiting constants (token bucket)
+#define RATE_BUCKET_MAX      5      // max tokens a client can hold
+#define RATE_REFILL_RATE     1.0    // tokens added per second
+#define RATE_MSG_COST        1      // tokens consumed per MSG or PM
+
 // Client Definition
 typedef struct client_t {
     int socket_fd;
     char client_name[MAX_USERNAME_LEN];
     room_t* current_room;
     presence_status_t status;   // online / away / busy
-}client_t;
+
+    // Token bucket for rate limiting (uses high-res monotonic clock)
+    double          tokens;         // current token count
+    struct timespec last_refill;    // last refill timestamp (nanosecond precision)
+} client_t;
 
 // Global rwlock — protects room_list[] and client_list[] arrays only.
 // Per-room operations use room->room_lock instead.
@@ -108,6 +117,7 @@ client_t *create_client(int socket_fd, const char* client_name, client_err_t *er
 client_t *find_client_unlocked(const char *username, client_err_t *err);
 client_t *find_client(const char *username, client_err_t *err);
 void delete_client(client_t *client, client_err_t *err);
+void notify_all_clients(const char *msg);
 
 
 #endif

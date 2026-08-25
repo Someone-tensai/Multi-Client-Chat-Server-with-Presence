@@ -1,7 +1,7 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -I include -lpthread
 
-SERVER_SRCS = src/server.c src/client_handler.c src/registry.c src/protocol.c src/display.c
+SERVER_SRCS = src/server.c src/client_handler.c src/registry.c src/protocol.c src/display.c src/threadpool.c
 CLIENT_SRCS = replies/client.c src/protocol.c src/display.c
 
 SERVER_BIN  = server

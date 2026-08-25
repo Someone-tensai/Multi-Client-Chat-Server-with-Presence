@@ -1,8 +1,34 @@
 #include "../include/server.h"
 #include "../include/registry.h"
 #include "../include/protocol.h"
+#include <time.h>
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Token bucket rate limiter — uses CLOCK_MONOTONIC for nanosecond precision.
+// time(NULL) only has 1-second resolution so fast bursts slip through undetected.
+// Returns 1 if allowed, 0 if rate limited.
+// ─────────────────────────────────────────────────────────────────────────────
+static int rate_limit_check(client_t *client)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
 
+    // Elapsed seconds as a precise double
+    double elapsed = (now.tv_sec  - client->last_refill.tv_sec) +
+                     (now.tv_nsec - client->last_refill.tv_nsec) / 1e9;
+
+    // Refill tokens proportional to elapsed time
+    client->tokens += elapsed * RATE_REFILL_RATE;
+    if (client->tokens > RATE_BUCKET_MAX)
+        client->tokens = RATE_BUCKET_MAX;
+    client->last_refill = now;
+
+    if (client->tokens < RATE_MSG_COST)
+        return 0;   // bucket empty — reject
+
+    client->tokens -= RATE_MSG_COST;
+    return 1;       // allowed
+}
 void handle_client(int client_fd)
 {
     client_t *me = NULL;
@@ -466,6 +492,14 @@ void handle_client(int client_fd)
                     break;
                 }
 
+                // Rate limit check
+                if(!rate_limit_check(me))
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_RATE_LIMITED);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
                 char *text = command.arg1;
                 if(text == NULL || strlen(text) == 0)
                 {
@@ -502,6 +536,14 @@ void handle_client(int client_fd)
                 if(text == NULL || strlen(text) == 0)
                 {
                     format_err_reply(reply, sizeof(reply), ERR_EMPTY_MESSAGE);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Rate limit check
+                if(!rate_limit_check(me))
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_RATE_LIMITED);
                     send(client_fd, reply, strlen(reply), 0);
                     break;
                 }

@@ -337,6 +337,22 @@ void room_delete_if_empty(room_t *room)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Broadcast a raw message to every connected client (used for server shutdown)
+// ─────────────────────────────────────────────────────────────────────────────
+void notify_all_clients(const char *msg)
+{
+    pthread_rwlock_rdlock(&registry_lock);
+    int fds[MAX_CLIENTS];
+    int count = client_count;
+    for (int i = 0; i < count; i++)
+        fds[i] = client_list[i]->socket_fd;
+    pthread_rwlock_unlock(&registry_lock);
+
+    for (int i = 0; i < count; i++)
+        send(fds[i], msg, strlen(msg), 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Client — find (unlocked, caller must hold at least rdlock on registry_lock)
 // ─────────────────────────────────────────────────────────────────────────────
 client_t *find_client_unlocked(const char *username, client_err_t *err)
@@ -403,6 +419,8 @@ client_t *create_client(int socket_fd, const char *client_name, client_err_t *er
     new_client->socket_fd    = socket_fd;
     new_client->current_room = NULL;
     new_client->status       = PRESENCE_ONLINE;
+    new_client->tokens       = RATE_BUCKET_MAX;
+    clock_gettime(CLOCK_MONOTONIC, &new_client->last_refill);
 
     client_list[client_count++] = new_client;
 
