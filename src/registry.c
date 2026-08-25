@@ -96,7 +96,6 @@ room_t* create_room(const char *room_name, client_t *creator_client, room_err_t 
     new_room->admin_client = creator_client;
     new_room->member_count = 0;
     new_room->history_count = 0;
-    new_room->history[history_count] = NULL;
     // Add the room to the global room list
     room_list[room_count++] = new_room;
 
@@ -226,7 +225,7 @@ void room_remove_member(room_t *room, client_t *client, room_err_t *err)
         // Shift them one step back from where they are deleted
         shift_array_room(room, client_index , room->member_count);
     }
-    room->members[member_count] = NULL;
+    room->members[room->member_count] = NULL;
     pthread_mutex_unlock(&registry_lock);
     *err = ROOM_OK;
     return;

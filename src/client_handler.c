@@ -1,5 +1,6 @@
 #include "../include/server.h"
 #include "../include/registry.h"
+#include "../include/protocol.h"
 
 
 void handle_client(int client_fd)
@@ -9,11 +10,17 @@ void handle_client(int client_fd)
     char reply[MAX_LINE_LEN];
     client_err_t client_err;
     room_err_t room_err;
+    room_t *already_in;
     ssize_t bytes_received;
     // While Recv is still receiving bytes
     while((bytes_received = recv(client_fd, input_buffer, sizeof(input_buffer)-1, 0)) > 0)
     {
       input_buffer[bytes_received] = '\0';
+      // Strip trailing \n and \r so commands like "WHO\n" match correctly
+      int len = strlen(input_buffer);
+      while(len > 0 && (input_buffer[len-1] == '\n' || input_buffer[len-1] == '\r'))
+          input_buffer[--len] = '\0';
+
       cmd command = parse_incoming_command_server(input_buffer);
 
       if(me == NULL && command.type != TYPE_REGISTER)
@@ -37,7 +44,7 @@ void handle_client(int client_fd)
                 // If Already Registered
                 if(me != NULL) 
                 {
-                    format_err_reply(reply, sizeof(reply), ERR_USER_ALREADY_REGISTERED);
+                    format_err_reply(reply, sizeof(reply), ERR_ALREADY_REGISTERED);
                     send(client_fd, reply, strlen(reply), 0);
                     break;
                 }
@@ -76,6 +83,11 @@ void handle_client(int client_fd)
                     
                     case CLIENT_ERR_MAX_CLIENTS:
                         format_err_reply(reply, sizeof(reply), ERR_MAX_CLIENT_COUNT_REACHED);
+                        send(client_fd, reply, strlen(reply), 0);
+                        break;
+
+                    default:
+                        format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
                         send(client_fd, reply, strlen(reply), 0);
                         break;
                 }
@@ -118,7 +130,7 @@ void handle_client(int client_fd)
                                 break;
 
                             case ROOM_ERR_MAX_MEMBERS:
-                                format_err_reply(reply, sizeof(reply), ERR_MAX_MEMBER_COUNT_REACHED);
+                                format_err_reply(reply, sizeof(reply), ERR_ROOM_MAX_MEMBER_COUNT_REACHED);
                                 send(client_fd, reply, strlen(reply), 0);
                                 break;
 
@@ -196,6 +208,11 @@ void handle_client(int client_fd)
                             format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
                             send(client_fd, reply, strlen(reply), 0);
                             break;
+
+                        default:
+                            format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
+                            send(client_fd, reply, strlen(reply), 0);
+                            break;
                     }
                 }
                 room_t *room_found = find_room(room_name, &room_err);
@@ -211,7 +228,7 @@ void handle_client(int client_fd)
                                 send(client_fd, reply, strlen(reply), 0);
 
                                 format_notice(reply, sizeof(reply), me->client_name , OK_JOINED , room_found->room_name);
-                                room_broadcast(room_found, reply, me->client_fd);
+                                room_broadcast(room_found, reply, me->socket_fd);
                                 break;
 
                             case ROOM_ERR_NULL:
@@ -225,7 +242,7 @@ void handle_client(int client_fd)
                                 break;
 
                             case ROOM_ERR_MAX_MEMBERS:
-                                format_err_reply(reply, sizeof(reply), ERR_MAX_MEMBER_COUNT_REACHED);
+                                format_err_reply(reply, sizeof(reply), ERR_ROOM_MAX_MEMBER_COUNT_REACHED);
                                 send(client_fd, reply, strlen(reply), 0);
                                 break;
                             
@@ -262,35 +279,174 @@ void handle_client(int client_fd)
 
         case TYPE_LEAVE:
             {
+                // Must be in a room to leave
+                if(me->current_room == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                room_t *leaving_room = me->current_room;
+
+                // Remove client from the room
+                room_remove_member(leaving_room, me, &room_err);
+                if(room_err != ROOM_OK)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                me->current_room = NULL;
+
+                // Tell the client they left
+                format_ok_reply(reply, sizeof(reply), OK_LEFT);
+                send(client_fd, reply, strlen(reply), 0);
+
+                // Notify everyone still in the room
+                format_notice(reply, sizeof(reply), me->client_name, OK_LEFT, leaving_room->room_name);
+                room_broadcast(leaving_room, reply, client_fd);
                 break;
             }
 
-        // Srijal 
         case TYPE_MSG:
             {
+                // Must be in a room to send a message
+                if(me->current_room == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                char *text = command.arg1;
+                if(text == NULL || strlen(text) == 0)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_EMPTY_MESSAGE);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Broadcast the message to everyone else in the room
+                format_msg_reply(reply, sizeof(reply), me->client_name, text);
+                room_broadcast(me->current_room, reply, client_fd);
+
+                // Confirm to sender
+                format_ok_reply(reply, sizeof(reply), OK_SENT);
+                send(client_fd, reply, strlen(reply), 0);
                 break;
-            }    
-        // Srijal
+            }
+
         case TYPE_PM:
             {
+                char *target_name = command.arg1;
+                char *text        = command.arg2;
+
+                if(target_name == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                if(text == NULL || strlen(text) == 0)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_EMPTY_MESSAGE);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Look up the target user
+                client_err_t pm_err;
+                client_t *target = find_client(target_name, &pm_err);
+                if(target == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_UNKNOWN_USER);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Send the private message to the target
+                format_pm_reply(reply, sizeof(reply), me->client_name, text);
+                send(target->socket_fd, reply, strlen(reply), 0);
+
+                // Confirm to sender
+                format_ok_reply(reply, sizeof(reply), OK_SENT);
+                send(client_fd, reply, strlen(reply), 0);
                 break;
             }
-        // Srijal
+
         case TYPE_ROOMS:
             {
+                // Build a list of all room names and send it back
+                char rooms_buf[MAX_LINE_LEN];
+                int offset = snprintf(rooms_buf, sizeof(rooms_buf), "%s", REPLY_ROOMS);
+
+                pthread_mutex_lock(&registry_lock);
+                for(int i = 0; i < room_count; i++)
+                {
+                    offset += snprintf(rooms_buf + offset, sizeof(rooms_buf) - offset,
+                                       " %s", room_list[i]->room_name);
+                }
+                pthread_mutex_unlock(&registry_lock);
+
+                snprintf(rooms_buf + offset, sizeof(rooms_buf) - offset, "\n");
+                send(client_fd, rooms_buf, strlen(rooms_buf), 0);
                 break;
             }
-        // Srijal
+
         case TYPE_WHO:
             {
+                // Must be in a room to list members
+                if(me->current_room == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Build a list of all usernames in the room
+                char who_buf[MAX_LINE_LEN];
+                int offset = snprintf(who_buf, sizeof(who_buf), "%s", REPLY_WHO);
+
+                pthread_mutex_lock(&registry_lock);
+                room_t *cur_room = me->current_room;
+                for(int i = 0; i < cur_room->member_count; i++)
+                {
+                    offset += snprintf(who_buf + offset, sizeof(who_buf) - offset,
+                                       " %s", cur_room->members[i]->client_name);
+                }
+                pthread_mutex_unlock(&registry_lock);
+
+                snprintf(who_buf + offset, sizeof(who_buf) - offset, "\n");
+                send(client_fd, who_buf, strlen(who_buf), 0);
                 break;
-            }     
+            }
         }
     }
     }
-    // Cleanup after  disconnection
-    // Remove member from room
-    // Delete the Client
-    // Close the client fd
-    // Notice to other clients
+
+    // Cleanup after disconnection
+    if(me != NULL)
+    {
+        // If still in a room, remove and notify others
+        if(me->current_room != NULL)
+        {
+            room_t *last_room = me->current_room;
+            room_remove_member(last_room, me, &room_err);
+            me->current_room = NULL;
+
+            // Notify remaining members
+            format_notice(reply, sizeof(reply), me->client_name, OK_LEFT, last_room->room_name);
+            room_broadcast(last_room, reply, client_fd);
+        }
+
+        // Remove client from the global registry
+        client_err_t cleanup_err;
+        delete_client(me, &cleanup_err);
+    }
+
+    // Close the socket
+    close(client_fd);
 }
