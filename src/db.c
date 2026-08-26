@@ -26,9 +26,12 @@ static const char *SCHEMA =
     "    room      TEXT    NOT NULL,"
     "    sender    TEXT    NOT NULL,"
     "    text      TEXT    NOT NULL,"
-    "    timestamp INTEGER NOT NULL"
+    "    timestamp INTEGER NOT NULL,"
+    "    edited_at INTEGER DEFAULT 0,"
+    "    deleted   INTEGER DEFAULT 0"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_messages_room ON messages(room, id);"
+    "CREATE INDEX IF NOT EXISTS idx_messages_deleted ON messages(room, deleted, id);"
 
     "CREATE TABLE IF NOT EXISTS users ("
     "    username      TEXT PRIMARY KEY,"
@@ -41,7 +44,12 @@ static const char *SCHEMA =
     "    expires_at INTEGER NOT NULL"
     ");"
     "CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions(username);"
-    "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);";
+    "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);"
+    "CREATE TABLE IF NOT EXISTS rooms ("
+    "    name       TEXT PRIMARY KEY,"
+    "    owner      TEXT NOT NULL,"
+    "    created_at INTEGER NOT NULL"
+    ");";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helper — hex-encode a SHA-256 digest into a 65-byte string
@@ -83,6 +91,10 @@ int db_open(void)
         return -1;
     }
 
+    // Migration for existing DBs (ignore errors if columns already exist)
+    sqlite3_exec(db, "ALTER TABLE messages ADD COLUMN edited_at INTEGER DEFAULT 0;", NULL, NULL, NULL);
+    sqlite3_exec(db, "ALTER TABLE messages ADD COLUMN deleted INTEGER DEFAULT 0;", NULL, NULL, NULL);
+
     pthread_mutex_unlock(&db_lock);
     LOG_INFO("Database opened: %s", DB_FILE);
     return 0;
@@ -100,14 +112,14 @@ void db_close(void)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Message history — save
+// Message history — save (returns DB id)
 // ─────────────────────────────────────────────────────────────────────────────
-void db_save_message(const char *room, const char *sender, const char *text)
+long long db_save_message(const char *room, const char *sender, const char *text)
 {
-    if (!db || !room || !sender || !text) return;
+    if (!db || !room || !sender || !text) return -1;
 
     const char *sql =
-        "INSERT INTO messages (room, sender, text, timestamp) VALUES (?, ?, ?, strftime('%s','now'));";
+        "INSERT INTO messages (room, sender, text, timestamp, edited_at, deleted) VALUES (?, ?, ?, strftime('%s','now'), 0, 0);";
 
     pthread_mutex_lock(&db_lock);
 
@@ -116,18 +128,22 @@ void db_save_message(const char *room, const char *sender, const char *text)
     {
         LOG_ERROR("db_save_message prepare: %s", sqlite3_errmsg(db));
         pthread_mutex_unlock(&db_lock);
-        return;
+        return -1;
     }
 
     sqlite3_bind_text(stmt, 1, room,   -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 2, sender, -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, text,   -1, SQLITE_STATIC);
 
-    if (sqlite3_step(stmt) != SQLITE_DONE)
+    long long id = -1;
+    if (sqlite3_step(stmt) == SQLITE_DONE)
+        id = sqlite3_last_insert_rowid(db);
+    else
         LOG_ERROR("db_save_message step: %s", sqlite3_errmsg(db));
 
     sqlite3_finalize(stmt);
     pthread_mutex_unlock(&db_lock);
+    return id;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,10 +153,9 @@ int db_load_history(const char *room, db_message_t *out, int limit)
 {
     if (!db || !room || !out || limit <= 0) return 0;
 
-    // Subquery so we get the last N rows in chronological order
     const char *sql =
-        "SELECT sender, text, timestamp FROM ("
-        "  SELECT sender, text, timestamp, id FROM messages WHERE room = ?"
+        "SELECT id, sender, text, timestamp, edited_at, deleted FROM ("
+        "  SELECT id, sender, text, timestamp, edited_at, deleted FROM messages WHERE room = ?"
         "  ORDER BY id DESC LIMIT ?"
         ") ORDER BY id ASC;";
 
@@ -160,21 +175,121 @@ int db_load_history(const char *room, db_message_t *out, int limit)
     int count = 0;
     while (sqlite3_step(stmt) == SQLITE_ROW && count < limit)
     {
-        const char *sender = (const char *)sqlite3_column_text(stmt, 0);
-        const char *text   = (const char *)sqlite3_column_text(stmt, 1);
-        long ts            = (long)sqlite3_column_int64(stmt, 2);
+        long long id       = sqlite3_column_int64(stmt, 0);
+        const char *sender = (const char *)sqlite3_column_text(stmt, 1);
+        const char *text   = (const char *)sqlite3_column_text(stmt, 2);
+        long ts            = (long)sqlite3_column_int64(stmt, 3);
+        long edited        = (long)sqlite3_column_int64(stmt, 4);
+        int deleted        = sqlite3_column_int(stmt, 5);
 
+        out[count].id = id;
         strncpy(out[count].sender, sender ? sender : "", sizeof(out[count].sender) - 1);
         strncpy(out[count].text,   text   ? text   : "", sizeof(out[count].text)   - 1);
         out[count].sender[sizeof(out[count].sender) - 1] = '\0';
         out[count].text  [sizeof(out[count].text)   - 1] = '\0';
         out[count].timestamp = ts;
+        out[count].edited_at = edited;
+        out[count].deleted = deleted;
         count++;
     }
 
     sqlite3_finalize(stmt);
     pthread_mutex_unlock(&db_lock);
     return count;
+}
+
+int db_load_history_before(const char *room, long long before_id, int limit, db_message_t *out, long long *next_cursor)
+{
+    if (!db || !room || !out || limit <= 0) return 0;
+    const char *sql;
+    if (before_id <= 0) {
+        sql = "SELECT id, sender, text, timestamp, edited_at, deleted FROM messages WHERE room = ? ORDER BY id DESC LIMIT ?;";
+    } else {
+        sql = "SELECT id, sender, text, timestamp, edited_at, deleted FROM messages WHERE room = ? AND id < ? ORDER BY id DESC LIMIT ?;";
+    }
+    pthread_mutex_lock(&db_lock);
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        LOG_ERROR("db_load_history_before prepare: %s", sqlite3_errmsg(db));
+        pthread_mutex_unlock(&db_lock);
+        return 0;
+    }
+    if (before_id <= 0) {
+        sqlite3_bind_text(stmt, 1, room, -1, SQLITE_STATIC);
+        sqlite3_bind_int(stmt, 2, limit);
+    } else {
+        sqlite3_bind_text(stmt, 1, room, -1, SQLITE_STATIC);
+        sqlite3_bind_int64(stmt, 2, before_id);
+        sqlite3_bind_int(stmt, 3, limit);
+    }
+    int count = 0;
+    long long smallest = 0;
+    // Fetch DESC then reverse to ASC for client
+    db_message_t tmp[256];
+    if (limit > 256) limit = 256;
+    while (sqlite3_step(stmt) == SQLITE_ROW && count < limit) {
+        tmp[count].id = sqlite3_column_int64(stmt, 0);
+        const char *s = (const char *)sqlite3_column_text(stmt, 1);
+        const char *t = (const char *)sqlite3_column_text(stmt, 2);
+        tmp[count].timestamp = (long)sqlite3_column_int64(stmt, 3);
+        tmp[count].edited_at = (long)sqlite3_column_int64(stmt, 4);
+        tmp[count].deleted = sqlite3_column_int(stmt, 5);
+        strncpy(tmp[count].sender, s ? s : "", sizeof(tmp[count].sender)-1);
+        strncpy(tmp[count].text, t ? t : "", sizeof(tmp[count].text)-1);
+        tmp[count].sender[sizeof(tmp[count].sender)-1]='\0';
+        tmp[count].text[sizeof(tmp[count].text)-1]='\0';
+        if (count==0 || tmp[count].id < smallest) smallest = tmp[count].id;
+        count++;
+    }
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    // Reverse to ASC
+    for (int i=0;i<count/2;i++) {
+        db_message_t swap = tmp[i];
+        tmp[i]=tmp[count-1-i];
+        tmp[count-1-i]=swap;
+    }
+    for (int i=0;i<count;i++) out[i]=tmp[i];
+    if (next_cursor) *next_cursor = (count>0 ? smallest : 0);
+    return count;
+}
+
+int db_edit_message(long long msg_id, const char *new_text)
+{
+    if (!db || msg_id <=0 || !new_text) return -1;
+    const char *sql = "UPDATE messages SET text = ?, edited_at = strftime('%s','now') WHERE id = ? AND deleted = 0;";
+    pthread_mutex_lock(&db_lock);
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&db_lock);
+        return -1;
+    }
+    sqlite3_bind_text(stmt,1,new_text,-1,SQLITE_STATIC);
+    sqlite3_bind_int64(stmt,2,msg_id);
+    int rc = sqlite3_step(stmt);
+    int changes = sqlite3_changes(db);
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return (rc==SQLITE_DONE && changes>0) ? 0 : -1;
+}
+
+int db_delete_message(long long msg_id)
+{
+    if (!db || msg_id <=0) return -1;
+    // Soft delete: keep row, mark deleted, retain text for audit but client will show [deleted]
+    const char *sql = "UPDATE messages SET deleted = 1, text = '[deleted]' WHERE id = ? AND deleted = 0;";
+    pthread_mutex_lock(&db_lock);
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&db_lock);
+        return -1;
+    }
+    sqlite3_bind_int64(stmt,1,msg_id);
+    int rc = sqlite3_step(stmt);
+    int changes = sqlite3_changes(db);
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return (rc==SQLITE_DONE && changes>0) ? 0 : -1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -419,4 +534,99 @@ int db_cleanup_expired_sessions(void)
     }
     pthread_mutex_unlock(&db_lock);
     return (rc == SQLITE_OK) ? changes : -1;
+}
+
+int db_create_room(const char *room_name, const char *owner)
+{
+    if (!db || !room_name || !owner) return -1;
+    const char *sql = "INSERT INTO rooms (name, owner, created_at) VALUES (?, ?, strftime('%s','now'));";
+    pthread_mutex_lock(&db_lock);
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&db_lock);
+        return -1;
+    }
+    sqlite3_bind_text(stmt,1,room_name,-1,SQLITE_STATIC);
+    sqlite3_bind_text(stmt,2,owner,-1,SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    if (rc==SQLITE_CONSTRAINT) return -1;
+    return (rc==SQLITE_DONE)?0:-1;
+}
+
+int db_delete_room(const char *room_name)
+{
+    if (!db || !room_name) return -1;
+    const char *sql = "DELETE FROM rooms WHERE name = ?;";
+    pthread_mutex_lock(&db_lock);
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&db_lock);
+        return -1;
+    }
+    sqlite3_bind_text(stmt,1,room_name,-1,SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return (rc==SQLITE_DONE)?0:-1;
+}
+
+int db_load_rooms(char rooms[][32], int max_rooms)
+{
+    if (!db || !rooms || max_rooms<=0) return 0;
+    const char *sql = "SELECT name FROM rooms ORDER BY created_at ASC LIMIT ?;";
+    pthread_mutex_lock(&db_lock);
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&db_lock);
+        return 0;
+    }
+    sqlite3_bind_int(stmt,1,max_rooms);
+    int count=0;
+    while (sqlite3_step(stmt)==SQLITE_ROW && count<max_rooms) {
+        const char *n = (const char*)sqlite3_column_text(stmt,0);
+        strncpy(rooms[count], n?n:"", 31);
+        rooms[count][31]='\0';
+        count++;
+    }
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return count;
+}
+
+int db_search_messages(const char *room, const char *query, int limit, db_message_t *out)
+{
+    if (!db || !room || !query || !out || limit<=0) return 0;
+    // Simple LIKE search, case-insensitive via GLOB? Use LIKE with %query%
+    const char *sql = "SELECT id, sender, text, timestamp, edited_at, deleted FROM messages WHERE room = ? AND text LIKE ? AND deleted=0 ORDER BY id DESC LIMIT ?;";
+    pthread_mutex_lock(&db_lock);
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        LOG_ERROR("db_search_messages prepare: %s", sqlite3_errmsg(db));
+        pthread_mutex_unlock(&db_lock);
+        return 0;
+    }
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern), "%%%s%%", query);
+    sqlite3_bind_text(stmt,1,room,-1,SQLITE_STATIC);
+    sqlite3_bind_text(stmt,2,pattern,-1,SQLITE_STATIC);
+    sqlite3_bind_int(stmt,3,limit);
+    int count=0;
+    while (sqlite3_step(stmt)==SQLITE_ROW && count<limit) {
+        out[count].id = sqlite3_column_int64(stmt,0);
+        const char *s=(const char*)sqlite3_column_text(stmt,1);
+        const char *t=(const char*)sqlite3_column_text(stmt,2);
+        out[count].timestamp=(long)sqlite3_column_int64(stmt,3);
+        out[count].edited_at=(long)sqlite3_column_int64(stmt,4);
+        out[count].deleted=sqlite3_column_int(stmt,5);
+        strncpy(out[count].sender, s?s:"", sizeof(out[count].sender)-1);
+        strncpy(out[count].text, t?t:"", sizeof(out[count].text)-1);
+        out[count].sender[sizeof(out[count].sender)-1]='\0';
+        out[count].text[sizeof(out[count].text)-1]='\0';
+        count++;
+    }
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return count;
 }

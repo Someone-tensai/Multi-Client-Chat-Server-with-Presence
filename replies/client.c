@@ -253,13 +253,67 @@ static void handle_server_line(char *line)
         }
     }
 
-    // ── MSG <sender> <text> ───────────────────
+    // ── MSG [<id>] <sender> <text> ───────────────────
     else if (strcmp(first, REPLY_MSG) == 0)
     {
-        char *sender = next_token(&rest, " ");
-        char *text   = rest;   // rest of line is the message
-        if (sender && text)
-            display_message(current_room[0] ? current_room : "?", sender, text);
+        char *first_tok = next_token(&rest, " ");
+        char *text = NULL;
+        char *sender = NULL;
+        char *id_str = NULL;
+        if (first_tok) {
+            // Check if first_tok is numeric (message_id)
+            char *end;
+            strtoll(first_tok, &end, 10);
+            if (*end=='\0' && rest && *rest) {
+                // Numeric -> treat as id
+                id_str = first_tok;
+                sender = next_token(&rest, " ");
+                text = rest;
+            } else {
+                // Old format: first_tok is sender
+                sender = first_tok;
+                text = rest;
+            }
+        }
+        if (sender && text) {
+            // Optionally show id in debug
+            if (id_str) {
+                char disp_text[MAX_TEXT_LEN+32];
+                snprintf(disp_text, sizeof(disp_text), "[%s] %s", id_str, text);
+                display_message(current_room[0] ? current_room : "?", sender, disp_text);
+            } else {
+                display_message(current_room[0] ? current_room : "?", sender, text);
+            }
+        }
+    }
+    else if (strcmp(first, REPLY_EDITED) == 0)
+    {
+        char *id = next_token(&rest, " ");
+        char *new_text = rest;
+        if (id && new_text) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "Message %s edited: %s", id, new_text);
+            display_notice(buf);
+        }
+    }
+    else if (strcmp(first, REPLY_DELETED) == 0)
+    {
+        char *id = next_token(&rest, " ");
+        if (id) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Message %s deleted", id);
+            display_notice(buf);
+        }
+    }
+    else if (strcmp(first, REPLY_HISTORY) == 0)
+    {
+        char *room = next_token(&rest, " ");
+        char *cursor = next_token(&rest, " ");
+        char *cnt = next_token(&rest, " ");
+        char buf[256];
+        snprintf(buf, sizeof(buf), "History %s cursor=%s count=%s", room?room:"?", cursor?cursor:"0", cnt?cnt:"0");
+        display_system(buf);
+        // Following MSG lines will be displayed as normal MSG
     }
 
     // ── PM_FROM <sender> <text> ───────────────
