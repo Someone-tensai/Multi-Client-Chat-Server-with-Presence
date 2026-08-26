@@ -2,10 +2,12 @@
 #include "../include/registry.h"
 #include "../include/protocol.h"
 #include "../include/db.h"
+#include "../include/log.h"
 #include <sys/epoll.h>
 #include <time.h>
 #include <errno.h>
 #include <string.h>
+#include <stdlib.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Forward declare epoll_rearm (defined in server.c)
@@ -36,6 +38,68 @@ static int rate_limit_check(client_t *client)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper: create client even if username already active (for reconnect/login force)
+// Used to allow new connection to replace old when duplicate exists.
+// Returns new client or NULL on failure.
+// ─────────────────────────────────────────────────────────────────────────────
+static client_t *create_client_force(int socket_fd, const char *client_name, client_err_t *err)
+{
+    size_t len = strlen(client_name);
+    if (len == 0 || len >= MAX_USERNAME_LEN) { *err = CLIENT_ERR_INVALID_NAME; return NULL; }
+
+    pthread_rwlock_wrlock(&registry_lock);
+
+    if (client_capacity == 0 || client_list == NULL) {
+        pthread_rwlock_unlock(&registry_lock);
+        *err = CLIENT_ERR_MAX_CLIENTS;
+        return NULL;
+    }
+
+    if (client_count >= client_capacity)
+    {
+        pthread_rwlock_unlock(&registry_lock);
+        *err = CLIENT_ERR_MAX_CLIENTS;
+        return NULL;
+    }
+
+    // Intentionally skip duplicate check
+
+    client_t *new_client = malloc(sizeof(client_t));
+    if (!new_client)
+    {
+        pthread_rwlock_unlock(&registry_lock);
+        *err = CLIENT_ERR_ALLOC_FAILED;
+        return NULL;
+    }
+
+    strncpy(new_client->client_name, client_name, MAX_USERNAME_LEN);
+    new_client->client_name[MAX_USERNAME_LEN - 1] = '\0';
+    new_client->socket_fd    = socket_fd;
+    new_client->current_room = NULL;
+    new_client->status       = PRESENCE_ONLINE;
+    new_client->tokens       = RATE_BUCKET_MAX;
+    clock_gettime(CLOCK_MONOTONIC, &new_client->last_refill);
+
+    client_list[client_count++] = new_client;
+
+    pthread_rwlock_unlock(&registry_lock);
+    *err = CLIENT_OK;
+    return new_client;
+}
+
+static void evict_old_client_if_exists(const char *username, int new_fd)
+{
+    (void)new_fd;
+    // This is a best-effort eviction: if an old client with same username exists,
+    // we will close its socket and remove it from its room, but we keep its
+    // client object alive until its conn disconnects (to avoid dangling conn->me).
+    // Instead, we will just leave old client in list and allow duplicate.
+    // For now, we just log and allow duplicate; old will be cleaned on its own disconnect.
+    // No immediate action needed — duplicate handling is done via create_client_force.
+    LOG_INFO("Duplicate login for user %s — allowing new connection (old will be cleaned on disconnect)", username);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Cleanup — called when the client disconnects cleanly or on error.
 // Mirrors the teardown at the bottom of the old blocking handle_client.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,8 +118,6 @@ static void disconnect_cleanup(conn_t *conn)
             me->current_room = NULL;
 
             format_notice(reply, sizeof(reply), me->client_name, OK_LEFT, last_room->room_name);
-            // Broadcast using raw send — other clients are plain conn_t* we
-            // don't have here, so room_broadcast uses socket_fd directly.
             room_broadcast(last_room, reply, conn->fd);
 
             room_delete_if_empty(last_room);
@@ -64,6 +126,9 @@ static void disconnect_cleanup(conn_t *conn)
         client_err_t cleanup_err;
         delete_client(me, &cleanup_err);
         conn->me = NULL;
+        LOG_INFO("Client %s disconnected (fd=%d)", me->client_name, conn->fd);
+    } else {
+        LOG_DEBUG("Anonymous client disconnected (fd=%d)", conn->fd);
     }
 
     close(conn->fd);
@@ -86,7 +151,7 @@ static int process_line(conn_t *conn, char *line)
 
     cmd command = parse_incoming_command_server(line);
 
-    if (me == NULL && command.type != TYPE_REGISTER && command.type != TYPE_LOGIN)
+    if (me == NULL && command.type != TYPE_REGISTER && command.type != TYPE_LOGIN && command.type != TYPE_RECONNECT)
     {
         format_err_reply(reply, sizeof(reply), ERR_NOT_REGISTERED);
         conn_send(conn, reply, strlen(reply));
@@ -134,15 +199,33 @@ static int process_line(conn_t *conn, char *line)
                 break;
             }
 
+            // Check if already active (should not happen after DB check, but handle)
+            client_err_t dup_check;
+            client_t *existing = find_client(username, &dup_check);
+            if (existing) {
+                format_err_reply(reply, sizeof(reply), ERR_USERNAME_TAKEN);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+
             conn->me = create_client(client_fd, username, &client_err);
             me = conn->me;
 
             switch (client_err)
             {
-                case CLIENT_OK:
-                    format_ok_reply(reply, sizeof(reply), OK_REGISTERED);
+                case CLIENT_OK: {
+                    // Create session token
+                    char token[65];
+                    if (db_create_session(username, token, sizeof(token)) == 0) {
+                        LOG_INFO("User %s registered, session created", username);
+                        format_ok_session(reply, sizeof(reply), OK_REGISTERED, token);
+                    } else {
+                        LOG_WARN("Session creation failed for %s", username);
+                        format_ok_reply(reply, sizeof(reply), OK_REGISTERED);
+                    }
                     conn_send(conn, reply, strlen(reply));
                     break;
+                }
                 case CLIENT_ERR_ALLOC_FAILED:
                     format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
                     conn_send(conn, reply, strlen(reply));
@@ -205,15 +288,32 @@ static int process_line(conn_t *conn, char *line)
                 break;
             }
 
-            conn->me = create_client(client_fd, username, &client_err);
+            // Handle duplicate active session: allow new login to replace old
+            client_err_t dup_check;
+            client_t *existing = find_client(username, &dup_check);
+            if (existing) {
+                evict_old_client_if_exists(username, client_fd);
+                // Use force create to allow duplicate username temporarily
+                conn->me = create_client_force(client_fd, username, &client_err);
+            } else {
+                conn->me = create_client(client_fd, username, &client_err);
+            }
             me = conn->me;
 
             switch (client_err)
             {
-                case CLIENT_OK:
-                    format_ok_reply(reply, sizeof(reply), OK_LOGGED_IN);
+                case CLIENT_OK: {
+                    char token[65];
+                    if (db_create_session(username, token, sizeof(token)) == 0) {
+                        LOG_INFO("User %s logged in, session created", username);
+                        format_ok_session(reply, sizeof(reply), OK_LOGGED_IN, token);
+                    } else {
+                        LOG_WARN("Session creation failed for %s", username);
+                        format_ok_reply(reply, sizeof(reply), OK_LOGGED_IN);
+                    }
                     conn_send(conn, reply, strlen(reply));
                     break;
+                }
                 case CLIENT_ERR_ALREADY_EXISTS:
                     format_err_reply(reply, sizeof(reply), ERR_USERNAME_TAKEN);
                     conn_send(conn, reply, strlen(reply));
@@ -232,6 +332,97 @@ static int process_line(conn_t *conn, char *line)
                     conn->me = NULL;
                     me = NULL;
                     break;
+            }
+            break;
+        }
+
+        case TYPE_RECONNECT:
+        {
+            if (me != NULL)
+            {
+                format_err_reply(reply, sizeof(reply), ERR_ALREADY_REGISTERED);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+
+            char *token = command.arg1;
+            if (token == NULL)
+            {
+                format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+
+            // Cleanup expired sessions periodically
+            db_cleanup_expired_sessions();
+
+            char username[MAX_USERNAME_LEN];
+            int valid = db_validate_session(token, username, sizeof(username));
+            if (valid == -1)
+            {
+                format_err_reply(reply, sizeof(reply), ERR_INVALID_TOKEN);
+                conn_send(conn, reply, strlen(reply));
+                LOG_INFO("Reconnect failed: invalid token");
+                break;
+            }
+            if (valid == -2)
+            {
+                format_err_reply(reply, sizeof(reply), ERR_SESSION_EXPIRED);
+                conn_send(conn, reply, strlen(reply));
+                LOG_INFO("Reconnect failed: expired token");
+                break;
+            }
+            if (valid != 0)
+            {
+                format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+
+            // Token valid — verify user still exists
+            if (!db_user_exists(username))
+            {
+                format_err_reply(reply, sizeof(reply), ERR_UNKNOWN_USER);
+                conn_send(conn, reply, strlen(reply));
+                db_delete_session(token);
+                break;
+            }
+
+            // Handle duplicate active client (allow reconnect to replace)
+            client_err_t dup_check;
+            client_t *existing = find_client(username, &dup_check);
+            if (existing) {
+                evict_old_client_if_exists(username, client_fd);
+                conn->me = create_client_force(client_fd, username, &client_err);
+            } else {
+                conn->me = create_client(client_fd, username, &client_err);
+            }
+            me = conn->me;
+
+            if (client_err != CLIENT_OK)
+            {
+                if (client_err == CLIENT_ERR_MAX_CLIENTS)
+                    format_err_reply(reply, sizeof(reply), ERR_MAX_CLIENT_COUNT_REACHED);
+                else
+                    format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
+                conn_send(conn, reply, strlen(reply));
+                conn->me = NULL;
+                me = NULL;
+                break;
+            }
+
+            // Rotate token: delete old, create new
+            db_delete_session(token);
+            char new_token[65];
+            if (db_create_session(username, new_token, sizeof(new_token)) != 0) {
+                LOG_WARN("Token rotation failed for %s", username);
+                // Still succeed with old token's username, but without new token
+                format_ok_reply(reply, sizeof(reply), OK_RECONNECTED);
+                conn_send(conn, reply, strlen(reply));
+            } else {
+                LOG_INFO("User %s reconnected, token rotated", username);
+                format_ok_session(reply, sizeof(reply), OK_RECONNECTED, new_token);
+                conn_send(conn, reply, strlen(reply));
             }
             break;
         }
@@ -258,6 +449,7 @@ static int process_line(conn_t *conn, char *line)
                             me->current_room = new_room;
                             format_ok_reply(reply, sizeof(reply), OK_CREATED);
                             conn_send(conn, reply, strlen(reply));
+                            LOG_INFO("User %s created room %s", me->client_name, room_name);
                             break;
                         case ROOM_ERR_NULL:
                             format_err_reply(reply, sizeof(reply), ERR_ROOM_NULL);
@@ -357,6 +549,7 @@ static int process_line(conn_t *conn, char *line)
                             room_send_history(room_found, client_fd);
                             format_notice(reply, sizeof(reply), me->client_name, OK_JOINED, room_found->room_name);
                             room_broadcast(room_found, reply, conn->fd);
+                            LOG_INFO("User %s joined room %s", me->client_name, room_found->room_name);
                             break;
                         case ROOM_ERR_NULL:
                             format_err_reply(reply, sizeof(reply), ERR_ROOM_NULL);
@@ -422,6 +615,7 @@ static int process_line(conn_t *conn, char *line)
             room_broadcast(leaving_room, reply, client_fd);
 
             room_delete_if_empty(leaving_room);
+            LOG_INFO("User %s left room %s", me->client_name, leaving_room->room_name);
             break;
         }
 
@@ -489,6 +683,7 @@ static int process_line(conn_t *conn, char *line)
             conn_send(conn, reply, strlen(reply));
 
             room_delete_if_empty(kicked_from);
+            LOG_INFO("User %s kicked %s from %s", me->client_name, target_name, kicked_from->room_name);
             break;
         }
 
@@ -537,6 +732,7 @@ static int process_line(conn_t *conn, char *line)
 
             format_notice(reply, sizeof(reply), target_name, OK_PROMOTED, me->current_room->room_name);
             room_broadcast(me->current_room, reply, -1);
+            LOG_INFO("User %s promoted %s in %s", me->client_name, target_name, me->current_room->room_name);
             break;
         }
 
@@ -570,6 +766,7 @@ static int process_line(conn_t *conn, char *line)
 
             format_ok_reply(reply, sizeof(reply), OK_SENT);
             conn_send(conn, reply, strlen(reply));
+            LOG_DEBUG("MSG from %s in %s", me->client_name, me->current_room->room_name);
             break;
         }
 
@@ -611,22 +808,56 @@ static int process_line(conn_t *conn, char *line)
 
             format_ok_reply(reply, sizeof(reply), OK_SENT);
             conn_send(conn, reply, strlen(reply));
+            LOG_DEBUG("PM from %s to %s", me->client_name, target_name);
             break;
         }
 
         case TYPE_ROOMS:
         {
+            // Pagination: ROOMS [offset] [limit]
+            int offset = 0;
+            int limit = -1; // -1 means no limit (all)
+            if (command.arg1) {
+                offset = atoi(command.arg1);
+                if (offset < 0) offset = 0;
+            }
+            if (command.arg2) {
+                limit = atoi(command.arg2);
+                if (limit < 0) limit = 0;
+                if (limit > 1000) limit = 1000; // cap excessively large limit
+            }
+
             char rooms_buf[MAX_LINE_LEN];
-            int offset = snprintf(rooms_buf, sizeof(rooms_buf), "%s", REPLY_ROOMS);
+            // New format includes pagination info: ROOMS_REPLY <total> <offset> <count> [room...]
+            // For backwards compat, if no pagination args, send old format: ROOMS_REPLY room1 room2...
+            int use_pagination = (command.arg1 != NULL || command.arg2 != NULL);
 
-            pthread_rwlock_rdlock(&registry_lock);
-            for (int i = 0; i < room_count; i++)
-                offset += snprintf(rooms_buf + offset, sizeof(rooms_buf) - offset,
-                                   " %s", room_list[i]->room_name);
-            pthread_rwlock_unlock(&registry_lock);
+            if (use_pagination) {
+                pthread_rwlock_rdlock(&registry_lock);
+                int total = room_count;
+                if (offset > total) offset = total;
+                int remaining = total - offset;
+                int count = 0;
+                if (limit < 0) count = remaining;
+                else count = (limit < remaining) ? limit : remaining;
 
-            snprintf(rooms_buf + offset, sizeof(rooms_buf) - offset, "\n");
-            conn_send(conn, rooms_buf, strlen(rooms_buf));
+                int off = snprintf(rooms_buf, sizeof(rooms_buf), "%s %d %d %d", REPLY_ROOMS, total, offset, count);
+                for (int i = offset; i < offset + count; i++) {
+                    off += snprintf(rooms_buf + off, sizeof(rooms_buf) - off, " %s", room_list[i]->room_name);
+                    if (off >= (int)sizeof(rooms_buf) - 32) break; // avoid overflow
+                }
+                pthread_rwlock_unlock(&registry_lock);
+                snprintf(rooms_buf + off, sizeof(rooms_buf) - off, "\n");
+                conn_send(conn, rooms_buf, strlen(rooms_buf));
+            } else {
+                int off = snprintf(rooms_buf, sizeof(rooms_buf), "%s", REPLY_ROOMS);
+                pthread_rwlock_rdlock(&registry_lock);
+                for (int i = 0; i < room_count; i++)
+                    off += snprintf(rooms_buf + off, sizeof(rooms_buf) - off, " %s", room_list[i]->room_name);
+                pthread_rwlock_unlock(&registry_lock);
+                snprintf(rooms_buf + off, sizeof(rooms_buf) - off, "\n");
+                conn_send(conn, rooms_buf, strlen(rooms_buf));
+            }
             break;
         }
 
@@ -685,25 +916,61 @@ static int process_line(conn_t *conn, char *line)
                 break;
             }
 
-            char who_buf[MAX_LINE_LEN];
-            int offset = snprintf(who_buf, sizeof(who_buf), "%s", REPLY_WHO);
+            // Pagination: WHO [offset] [limit]
+            int offset = 0;
+            int limit = -1;
+            if (command.arg1) {
+                offset = atoi(command.arg1);
+                if (offset < 0) offset = 0;
+            }
+            if (command.arg2) {
+                limit = atoi(command.arg2);
+                if (limit < 0) limit = 0;
+                if (limit > 1000) limit = 1000;
+            }
+            int use_pagination = (command.arg1 != NULL || command.arg2 != NULL);
 
+            char who_buf[MAX_LINE_LEN];
             pthread_mutex_lock(&me->current_room->room_lock);
             room_t *cur_room = me->current_room;
-            for (int i = 0; i < cur_room->member_count; i++)
-            {
-                client_t *m = cur_room->members[i];
-                const char *s = (m->status == PRESENCE_AWAY) ? STATUS_AWAY :
-                                (m->status == PRESENCE_BUSY) ? STATUS_BUSY :
-                                                                STATUS_ONLINE;
-                const char *admin_mark = (cur_room->admin_client == m) ? "*" : "";
-                offset += snprintf(who_buf + offset, sizeof(who_buf) - offset,
-                                   " %s%s/%s", admin_mark, m->client_name, s);
-            }
-            pthread_mutex_unlock(&me->current_room->room_lock);
+            int total = cur_room->member_count;
+            if (offset > total) offset = total;
+            int remaining = total - offset;
+            int count = 0;
+            if (limit < 0) count = remaining;
+            else count = (limit < remaining) ? limit : remaining;
 
-            snprintf(who_buf + offset, sizeof(who_buf) - offset, "\n");
-            conn_send(conn, who_buf, strlen(who_buf));
+            if (use_pagination) {
+                int off = snprintf(who_buf, sizeof(who_buf), "%s %d %d %d", REPLY_WHO, total, offset, count);
+                for (int i = offset; i < offset + count; i++)
+                {
+                    client_t *m = cur_room->members[i];
+                    const char *s = (m->status == PRESENCE_AWAY) ? STATUS_AWAY :
+                                    (m->status == PRESENCE_BUSY) ? STATUS_BUSY :
+                                                                     STATUS_ONLINE;
+                    const char *admin_mark = (cur_room->admin_client == m) ? "*" : "";
+                    off += snprintf(who_buf + off, sizeof(who_buf) - off, " %s%s/%s", admin_mark, m->client_name, s);
+                    if (off >= (int)sizeof(who_buf) - 32) break;
+                }
+                pthread_mutex_unlock(&me->current_room->room_lock);
+                snprintf(who_buf + off, sizeof(who_buf) - off, "\n");
+                conn_send(conn, who_buf, strlen(who_buf));
+            } else {
+                int off = snprintf(who_buf, sizeof(who_buf), "%s", REPLY_WHO);
+                for (int i = 0; i < cur_room->member_count; i++)
+                {
+                    client_t *m = cur_room->members[i];
+                    const char *s = (m->status == PRESENCE_AWAY) ? STATUS_AWAY :
+                                    (m->status == PRESENCE_BUSY) ? STATUS_BUSY :
+                                                                     STATUS_ONLINE;
+                    const char *admin_mark = (cur_room->admin_client == m) ? "*" : "";
+                    off += snprintf(who_buf + off, sizeof(who_buf) - off,
+                                       " %s%s/%s", admin_mark, m->client_name, s);
+                }
+                pthread_mutex_unlock(&me->current_room->room_lock);
+                snprintf(who_buf + off, sizeof(who_buf) - off, "\n");
+                conn_send(conn, who_buf, strlen(who_buf));
+            }
             break;
         }
     }

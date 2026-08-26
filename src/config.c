@@ -47,9 +47,14 @@ int config_load(server_config_t *cfg, const char *path)
     cfg->rate_refill_rate   = CFG_DEFAULT_RATE_REFILL_RATE;
     cfg->rate_msg_cost      = CFG_DEFAULT_RATE_MSG_COST;
     strncpy(cfg->tls_cert, CFG_DEFAULT_TLS_CERT, sizeof(cfg->tls_cert) - 1);
+    cfg->tls_cert[sizeof(cfg->tls_cert)-1] = '\0';
     strncpy(cfg->tls_key,  CFG_DEFAULT_TLS_KEY,  sizeof(cfg->tls_key) - 1);
+    cfg->tls_key[sizeof(cfg->tls_key)-1] = '\0';
     cfg->pool_shrink_idle_sec = CFG_DEFAULT_POOL_SHRINK_IDLE;
     cfg->pool_min_threads   = CFG_DEFAULT_POOL_MIN_THREADS;
+    strncpy(cfg->log_level, CFG_DEFAULT_LOG_LEVEL, sizeof(cfg->log_level)-1);
+    cfg->log_level[sizeof(cfg->log_level)-1] = '\0';
+    cfg->log_file[0] = '\0';
 
     FILE *fp = fopen(path, "r");
     if (!fp) return -1;
@@ -98,6 +103,10 @@ int config_load(server_config_t *cfg, const char *path)
             cfg->pool_shrink_idle_sec = atoi(val);
         else if (strcmp(key, "pool_min_threads") == 0)
             cfg->pool_min_threads = atoi(val);
+        else if (strcmp(key, "log_level") == 0)
+            strncpy(cfg->log_level, val, sizeof(cfg->log_level)-1);
+        else if (strcmp(key, "log_file") == 0)
+            strncpy(cfg->log_file, val, sizeof(cfg->log_file)-1);
     }
 
     fclose(fp);

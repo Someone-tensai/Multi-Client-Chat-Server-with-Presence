@@ -1,9 +1,11 @@
 #include "../include/threadpool.h"
 #include "../include/server.h"
 #include "../include/config.h"
+#include "../include/log.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <time.h>
+#include <errno.h>
 
 // ─────────────────────────────────────────────
 // Worker thread loop  (dynamic resize aware)
@@ -42,8 +44,7 @@ static void *worker(void *arg)
         {
             pool->marked_exits--;
             pool->thread_count--;
-            printf("Thread pool: worker exited (shrink, %d remain)\n",
-                   pool->thread_count);
+            LOG_INFO("Thread pool: worker exited (shrink, %d remain)", pool->thread_count);
             pthread_mutex_unlock(&pool->lock);
             return NULL;
         }
@@ -70,8 +71,7 @@ static void *worker(void *arg)
             {
                 pool->marked_exits--;
                 pool->thread_count--;
-                printf("Thread pool: worker exited (shrink, %d remain)\n",
-                       pool->thread_count);
+                LOG_INFO("Thread pool: worker exited (shrink, %d remain)", pool->thread_count);
                 pthread_mutex_unlock(&pool->lock);
                 return NULL;
             }
@@ -109,14 +109,14 @@ threadpool_t *threadpool_create(int max_threads)
     {
         if (pthread_create(&pool->threads[i], NULL, worker, pool) != 0)
         {
-            perror("threadpool: pthread_create failed");
+            LOG_ERROR_ERRNO("threadpool: pthread_create failed");
             pool->thread_count = i;
             threadpool_destroy(pool);
             return NULL;
         }
     }
 
-    printf("Thread pool started (%d workers)\n", max_threads);
+    LOG_INFO("Thread pool started (%d workers)", max_threads);
     return pool;
 }
 
@@ -165,12 +165,11 @@ int threadpool_submit(threadpool_t *pool, conn_t *conn)
             }
             else
             {
-                perror("threadpool: scale-up pthread_create failed");
+                LOG_ERROR_ERRNO("threadpool: scale-up pthread_create failed");
             }
         }
 
-        printf("Thread pool: scaled up to %d workers (queue=%d)\n",
-               pool->thread_count, pool->queue_size);
+        LOG_INFO("Thread pool: scaled up to %d workers (queue=%d)", pool->thread_count, pool->queue_size);
     }
 
     pthread_mutex_unlock(&pool->lock);
@@ -207,8 +206,7 @@ void threadpool_maybe_shrink(threadpool_t *pool)
     {
         pool->marked_exits += to_mark;
         pthread_cond_broadcast(&pool->not_empty);
-        printf("Thread pool: requesting %d idle workers to exit (%d remain)\n",
-               to_mark, pool->thread_count);
+        LOG_INFO("Thread pool: requesting %d idle workers to exit (%d remain)", to_mark, pool->thread_count);
     }
 
     pthread_mutex_unlock(&pool->lock);

@@ -4,8 +4,10 @@
 #include <pthread.h>
 #include <time.h>
 #include "protocol.h"
+#include "config.h"
 
-// Define Constants
+// Define Constants — legacy compile-time defaults (kept for backwards compat, not used for runtime capacity)
+// Runtime capacities are controlled via server.conf and registry_init()
 #define HISTORY_SIZE 10
 #define MAX_CLIENTS 64
 #define MAX_MEMBERS 16
@@ -52,16 +54,18 @@ typedef struct message_t {
     time_t timestamp;
 } message_t;
 
-// Room Defintion
+// Room Defintion — dynamic allocation based on server_config_t
 typedef struct room_t {
     char room_name[MAX_ROOM_NAME_LEN];
-    client_t * members[MAX_MEMBERS];
+    client_t **members;      // dynamically allocated [member_capacity]
     int member_count;
+    int member_capacity;
     client_t* admin_client;
 
-    message_t history[HISTORY_SIZE];
-    int history_count;       // total messages ever added (not capped)
+    message_t *history;      // dynamically allocated [history_capacity] circular buffer
+    int history_count;       // total messages ever added (may exceed history_capacity)
     int history_start;       // index of oldest message in circular buffer
+    int history_capacity;    // max history entries for this room
 
     pthread_mutex_t room_lock; // protects members[], history[] for this room only
 } room_t;
@@ -94,12 +98,19 @@ typedef struct client_t {
 // Per-room operations use room->room_lock instead.
 extern pthread_rwlock_t registry_lock;
 
-// Room List and Count
-extern room_t *room_list[MAX_ROOMS];
+// Room List and Count — dynamically allocated
+extern room_t **room_list;
 extern int room_count;
+extern int room_capacity;
 
-extern client_t *client_list[MAX_CLIENTS];
+extern client_t **client_list;
 extern int client_count;
+extern int client_capacity;
+
+// Registry lifecycle — must be called once at startup with runtime config
+int  registry_init(const server_config_t *cfg);
+void registry_destroy(void);
+void room_destroy(room_t *room);
 
 
 room_t *create_room(const char *room_name, client_t *creator_client, room_err_t *err);

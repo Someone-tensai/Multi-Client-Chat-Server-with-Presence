@@ -6,6 +6,7 @@
 typedef enum {
     TYPE_REGISTER,
     TYPE_LOGIN,
+    TYPE_RECONNECT,
     TYPE_CREATE,
     TYPE_JOIN,
     TYPE_MSG,
@@ -54,6 +55,7 @@ typedef struct cmd
 // Client -> Server
 #define CMD_REGISTER "REGISTER"
 #define CMD_LOGIN "LOGIN"
+#define CMD_RECONNECT "RECONNECT"
 #define CMD_CREATE "CREATE"
 #define CMD_JOIN "JOIN"
 #define CMD_MSG "MSG"
@@ -82,6 +84,8 @@ typedef struct cmd
 // If the command succeded
 #define OK_REGISTERED "REGISTERED"
 #define OK_LOGGED_IN  "LOGGED_IN"
+#define OK_RECONNECTED "RECONNECTED"
+#define OK_SESSION "SESSION"
 #define OK_CREATED "CREATED"
 #define OK_JOINED "JOINED"
 #define OK_LEFT "LEFT"
@@ -125,11 +129,17 @@ typedef struct cmd
 
 #define ERR_UNKNOWN_COMMAND "UNKNOWN_COMMAND"
 #define ERR_MALFORMED "MALFORMED"
+#define ERR_INVALID_TOKEN "INVALID_TOKEN"
+#define ERR_SESSION_EXPIRED "SESSION_EXPIRED"
+
+// Session token length (hex, 32 bytes = 64 chars)
+#define SESSION_TOKEN_LEN 64
 
 // Function Declarations
 #include <stddef.h>
 cmd parse_incoming_command_server(char *line);
 void format_ok_reply(char *out, size_t out_size, const char *status);
+void format_ok_session(char *out, size_t out_size, const char *status, const char *token);
 void format_err_reply(char *out, size_t out_size, const char *err_code);
 void format_notice(char *out, size_t out_size, const char *user, const char *action, const char *room);
 void format_msg_reply(char *out, size_t out_size, const char *sender, const char *text);

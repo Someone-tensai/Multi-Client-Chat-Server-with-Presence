@@ -99,16 +99,49 @@ static void handle_server_line(char *line)
     char *first = next_token(&rest, " ");
     if (first == NULL) return;
 
-    // ── OK <status> ───────────────────────────
+    // ── OK <status> [token] ───────────────────
     if (strcmp(first, REPLY_OK) == 0)
     {
         char *status = next_token(&rest, " ");
         if (status == NULL) { display_system("OK"); return; }
 
-        if (strcmp(status, OK_REGISTERED) == 0)
-            display_system("Registered successfully.");
-        else if (strcmp(status, OK_LOGGED_IN) == 0)
-            display_system("Logged in successfully.");
+        // Check for optional session token after status (for REGISTER/LOGIN/RECONNECT)
+        char *token = next_token(&rest, " ");
+
+        if (strcmp(status, OK_REGISTERED) == 0) {
+            if (token) {
+                char buf[160];
+                snprintf(buf, sizeof(buf), "Registered successfully. Session token: %s (save for RECONNECT)", token);
+                display_system(buf);
+            } else {
+                display_system("Registered successfully.");
+            }
+        }
+        else if (strcmp(status, OK_LOGGED_IN) == 0) {
+            if (token) {
+                char buf[160];
+                snprintf(buf, sizeof(buf), "Logged in successfully. Session token: %s", token);
+                display_system(buf);
+            } else {
+                display_system("Logged in successfully.");
+            }
+        }
+        else if (strcmp(status, OK_RECONNECTED) == 0) {
+            if (token) {
+                char buf[160];
+                snprintf(buf, sizeof(buf), "Reconnected successfully. New token: %s", token);
+                display_system(buf);
+            } else {
+                display_system("Reconnected successfully.");
+            }
+        }
+        else if (strcmp(status, OK_SESSION) == 0) {
+            if (token) {
+                char buf[160];
+                snprintf(buf, sizeof(buf), "Session token: %s", token);
+                display_system(buf);
+            }
+        }
         else if (strcmp(status, OK_CREATED) == 0)
             display_system("Room created. You are now in it.");
         else if (strcmp(status, OK_JOINED) == 0)
@@ -130,8 +163,11 @@ static void handle_server_line(char *line)
         }
         else
         {
-            char buf[128];
-            snprintf(buf, sizeof(buf), "OK %s", status);
+            char buf[256];
+            if (token)
+                snprintf(buf, sizeof(buf), "OK %s %s", status, token);
+            else
+                snprintf(buf, sizeof(buf), "OK %s", status);
             display_system(buf);
         }
     }
@@ -235,16 +271,50 @@ static void handle_server_line(char *line)
             display_pm(sender, text);
     }
 
-    // ── WHO_REPLY <name>/<status> ... ─────────
-    // Admin is prefixed with *
+    // ── WHO_REPLY [<total> <offset> <count>] <name>/<status> ... ─
+    // Admin is prefixed with *, pagination numbers if present
     else if (strcmp(first, REPLY_WHO) == 0)
     {
         char buf[MAX_LINE_LEN];
-        int  off = snprintf(buf, sizeof(buf), "Users in room:");
+        int off = 0;
+        // Peek if next 3 tokens are numeric (pagination)
+        char *save = rest;
+        char *t1 = next_token(&rest, " ");
+        char *t2 = NULL;
+        char *t3 = NULL;
+        int is_paginated = 0;
+        int total = 0, offset = 0, count = 0;
+        if (t1) {
+            char *e1;
+            total = (int)strtol(t1, &e1, 10);
+            if (*e1 == '\0') {
+                t2 = next_token(&rest, " ");
+                if (t2) {
+                    char *e2;
+                    offset = (int)strtol(t2, &e2, 10);
+                    if (*e2 == '\0') {
+                        t3 = next_token(&rest, " ");
+                        if (t3) {
+                            char *e3;
+                            count = (int)strtol(t3, &e3, 10);
+                            if (*e3 == '\0') {
+                                is_paginated = 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (is_paginated) {
+            off = snprintf(buf, sizeof(buf), "Users in room (%d total, %d-%d):", total, offset, offset+count-1 < 0 ? 0 : offset+count-1);
+        } else {
+            // Not paginated — rewind and treat all as entries
+            rest = save;
+            off = snprintf(buf, sizeof(buf), "Users in room:");
+        }
         char *entry;
         while ((entry = next_token(&rest, " ")) != NULL)
         {
-            // entry is like "alice/ONLINE" or "*bob/AWAY"
             int is_admin = (entry[0] == '*');
             char *name   = is_admin ? entry + 1 : entry;
             char *slash  = strchr(name, '/');
@@ -261,20 +331,68 @@ static void handle_server_line(char *line)
                                 is_admin ? " [*%s]" : " [%s]", name);
             }
         }
+        if (is_paginated && count == 0) {
+            off += snprintf(buf + off, sizeof(buf) - off, " (no entries in this page)");
+        }
         display_system(buf);
     }
 
-    // ── ROOMS_REPLY <room1> <room2> ... ───────
+    // ── ROOMS_REPLY [<total> <offset> <count>] <room1> <room2> ... ───
     else if (strcmp(first, REPLY_ROOMS) == 0)
     {
-        char buf[MAX_LINE_LEN] = "Active rooms:";
-        char *rname;
-        while ((rname = next_token(&rest, " ")) != NULL)
-        {
-            strncat(buf, " ", sizeof(buf) - strlen(buf) - 1);
-            strncat(buf, rname, sizeof(buf) - strlen(buf) - 1);
+        char buf[MAX_LINE_LEN];
+        // Try to parse pagination header
+        char *save = rest;
+        char *t1 = next_token(&rest, " ");
+        char *t2 = NULL;
+        char *t3 = NULL;
+        int is_paginated = 0;
+        int total = 0, offset = 0, count = 0;
+        if (t1) {
+            char *e1;
+            total = (int)strtol(t1, &e1, 10);
+            if (*e1 == '\0') {
+                t2 = next_token(&rest, " ");
+                if (t2) {
+                    char *e2;
+                    offset = (int)strtol(t2, &e2, 10);
+                    if (*e2 == '\0') {
+                        t3 = next_token(&rest, " ");
+                        if (t3) {
+                            char *e3;
+                            count = (int)strtol(t3, &e3, 10);
+                            if (*e3 == '\0') {
+                                is_paginated = 1;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        display_system(buf);
+        if (is_paginated) {
+            int off = snprintf(buf, sizeof(buf), "Active rooms (%d total, offset %d, %d shown):", total, offset, count);
+            char *rname;
+            int added = 0;
+            while ((rname = next_token(&rest, " ")) != NULL)
+            {
+                off += snprintf(buf + off, sizeof(buf) - off, " %s", rname);
+                added++;
+            }
+            if (added == 0) {
+                snprintf(buf + off, sizeof(buf) - off, " (none)");
+            }
+            display_system(buf);
+        } else {
+            // Not paginated — rewind
+            rest = save;
+            int off = snprintf(buf, sizeof(buf), "Active rooms:");
+            char *rname;
+            while ((rname = next_token(&rest, " ")) != NULL)
+            {
+                off += snprintf(buf + off, sizeof(buf) - off, " %s", rname);
+            }
+            display_system(buf);
+        }
     }
 
     // ── Unknown ───────────────────────────────
@@ -322,18 +440,21 @@ static void print_help(void)
     display_system("Commands:");
     display_system("  REGISTER <name> <pass> - register with password");
     display_system("  LOGIN <name> <pass>    - login with existing account");
+    display_system("  RECONNECT <token>      - reconnect with session token");
     display_system("  CREATE <room>        - create and join a room");
     display_system("  JOIN <room>          - join an existing room");
     display_system("  LEAVE                - leave current room");
     display_system("  MSG <text>           - send message to room");
     display_system("  PM <user> <text>     - send private message");
-    display_system("  WHO                  - list users in room");
-    display_system("  ROOMS                - list all rooms");
+    display_system("  WHO [offset] [limit] - list users in room (paginated)");
+    display_system("  ROOMS [offset] [limit] - list all rooms (paginated)");
     display_system("  KICK <user>          - kick a user (admin only)");
     display_system("  PROMOTE <user>       - make a user admin (admin only)");
     display_system("  STATUS <ONLINE|AWAY|BUSY> - set your presence status");
     display_system("  /help                - show this help");
     display_system("  /quit                - disconnect and exit");
+    display_system("Pagination: e.g. WHO 0 10, ROOMS 0 10");
+    display_system("Session: after REGISTER/LOGIN, save the token for RECONNECT");
 }
 
 // ─────────────────────────────────────────────

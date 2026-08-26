@@ -1,10 +1,13 @@
 #include "../include/db.h"
+#include "../include/log.h"
 #include <sqlite3.h>
 #include <openssl/sha.h>
+#include <openssl/rand.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <time.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Single global DB connection + its own mutex
@@ -30,7 +33,15 @@ static const char *SCHEMA =
     "CREATE TABLE IF NOT EXISTS users ("
     "    username      TEXT PRIMARY KEY,"
     "    password_hash TEXT NOT NULL"
-    ");";
+    ");"
+    "CREATE TABLE IF NOT EXISTS sessions ("
+    "    token      TEXT PRIMARY KEY,"
+    "    username   TEXT NOT NULL,"
+    "    created_at INTEGER NOT NULL,"
+    "    expires_at INTEGER NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions(username);"
+    "CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helper — hex-encode a SHA-256 digest into a 65-byte string
@@ -53,7 +64,7 @@ int db_open(void)
 
     if (sqlite3_open(DB_FILE, &db) != SQLITE_OK)
     {
-        fprintf(stderr, "db_open: %s\n", sqlite3_errmsg(db));
+        LOG_ERROR("db_open: %s", sqlite3_errmsg(db));
         pthread_mutex_unlock(&db_lock);
         return -1;
     }
@@ -66,14 +77,14 @@ int db_open(void)
     char *err = NULL;
     if (sqlite3_exec(db, SCHEMA, NULL, NULL, &err) != SQLITE_OK)
     {
-        fprintf(stderr, "db_open schema: %s\n", err);
+        LOG_ERROR("db_open schema: %s", err);
         sqlite3_free(err);
         pthread_mutex_unlock(&db_lock);
         return -1;
     }
 
     pthread_mutex_unlock(&db_lock);
-    printf("Database opened: %s\n", DB_FILE);
+    LOG_INFO("Database opened: %s", DB_FILE);
     return 0;
 }
 
@@ -103,7 +114,7 @@ void db_save_message(const char *room, const char *sender, const char *text)
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
     {
-        fprintf(stderr, "db_save_message prepare: %s\n", sqlite3_errmsg(db));
+        LOG_ERROR("db_save_message prepare: %s", sqlite3_errmsg(db));
         pthread_mutex_unlock(&db_lock);
         return;
     }
@@ -113,7 +124,7 @@ void db_save_message(const char *room, const char *sender, const char *text)
     sqlite3_bind_text(stmt, 3, text,   -1, SQLITE_STATIC);
 
     if (sqlite3_step(stmt) != SQLITE_DONE)
-        fprintf(stderr, "db_save_message step: %s\n", sqlite3_errmsg(db));
+        LOG_ERROR("db_save_message step: %s", sqlite3_errmsg(db));
 
     sqlite3_finalize(stmt);
     pthread_mutex_unlock(&db_lock);
@@ -129,16 +140,16 @@ int db_load_history(const char *room, db_message_t *out, int limit)
     // Subquery so we get the last N rows in chronological order
     const char *sql =
         "SELECT sender, text, timestamp FROM ("
-        "  SELECT sender, text, timestamp FROM messages WHERE room = ?"
+        "  SELECT sender, text, timestamp, id FROM messages WHERE room = ?"
         "  ORDER BY id DESC LIMIT ?"
-        ") ORDER BY timestamp ASC;";
+        ") ORDER BY id ASC;";
 
     pthread_mutex_lock(&db_lock);
 
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
     {
-        fprintf(stderr, "db_load_history prepare: %s\n", sqlite3_errmsg(db));
+        LOG_ERROR("db_load_history prepare: %s", sqlite3_errmsg(db));
         pthread_mutex_unlock(&db_lock);
         return 0;
     }
@@ -265,4 +276,147 @@ int db_user_exists(const char *username)
     sqlite3_finalize(stmt);
     pthread_mutex_unlock(&db_lock);
     return exists;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session handling — secure token generation
+// ─────────────────────────────────────────────────────────────────────────────
+int db_generate_token(char *out, size_t out_size)
+{
+    if (!out || out_size < 65) return -1;
+    unsigned char rand_bytes[32];
+    if (RAND_bytes(rand_bytes, sizeof(rand_bytes)) != 1) {
+        LOG_ERROR("RAND_bytes failed for session token");
+        return -1;
+    }
+    for (int i = 0; i < 32; i++) {
+        snprintf(out + i*2, out_size - (size_t)(i*2), "%02x", rand_bytes[i]);
+    }
+    out[64] = '\0';
+    return 0;
+}
+
+int db_create_session(const char *username, char *token_out, size_t token_out_size)
+{
+    if (!db || !username || !token_out || token_out_size < 65) return -1;
+
+    char token[65];
+    if (db_generate_token(token, sizeof(token)) != 0) return -1;
+
+    const char *sql = "INSERT INTO sessions (token, username, created_at, expires_at) VALUES (?, ?, strftime('%s','now'), strftime('%s','now') + ?);";
+
+    pthread_mutex_lock(&db_lock);
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&db_lock);
+        LOG_ERROR("db_create_session prepare: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, token, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, username, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 3, SESSION_EXPIRE_SEC);
+
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+
+    if (rc == SQLITE_CONSTRAINT) {
+        // Extremely unlikely token collision — retry once
+        LOG_WARN("Session token collision, retrying");
+        return db_create_session(username, token_out, token_out_size);
+    }
+    if (rc != SQLITE_DONE) {
+        LOG_ERROR("db_create_session step: %s", sqlite3_errmsg(db));
+        return -1;
+    }
+
+    strncpy(token_out, token, token_out_size - 1);
+    token_out[token_out_size - 1] = '\0';
+    return 0;
+}
+
+int db_validate_session(const char *token, char *username_out, size_t username_size)
+{
+    if (!db || !token || !username_out) return -3;
+    if (strlen(token) == 0) return -1;
+
+    const char *sql = "SELECT username, expires_at FROM sessions WHERE token = ?;";
+
+    pthread_mutex_lock(&db_lock);
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&db_lock);
+        return -3;
+    }
+
+    sqlite3_bind_text(stmt, 1, token, -1, SQLITE_STATIC);
+
+    int step = sqlite3_step(stmt);
+    if (step != SQLITE_ROW) {
+        sqlite3_finalize(stmt);
+        pthread_mutex_unlock(&db_lock);
+        return -1; // not found
+    }
+
+    const char *username = (const char *)sqlite3_column_text(stmt, 0);
+    long expires_at = (long)sqlite3_column_int64(stmt, 1);
+    long now = (long)time(NULL);
+
+    if (expires_at < now) {
+        sqlite3_finalize(stmt);
+        pthread_mutex_unlock(&db_lock);
+        // Expired — clean it up
+        db_delete_session(token);
+        return -2;
+    }
+
+    if (username) {
+        strncpy(username_out, username, username_size - 1);
+        username_out[username_size - 1] = '\0';
+    } else {
+        username_out[0] = '\0';
+    }
+
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return 0;
+}
+
+int db_delete_session(const char *token)
+{
+    if (!db || !token) return -1;
+    const char *sql = "DELETE FROM sessions WHERE token = ?;";
+
+    pthread_mutex_lock(&db_lock);
+
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&db_lock);
+        return -1;
+    }
+    sqlite3_bind_text(stmt, 1, token, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&db_lock);
+    return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int db_cleanup_expired_sessions(void)
+{
+    if (!db) return -1;
+    const char *sql = "DELETE FROM sessions WHERE expires_at < strftime('%s','now');";
+
+    pthread_mutex_lock(&db_lock);
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+    int changes = sqlite3_changes(db);
+    if (err) {
+        LOG_WARN("db_cleanup_expired_sessions: %s", err);
+        sqlite3_free(err);
+    }
+    pthread_mutex_unlock(&db_lock);
+    return (rc == SQLITE_OK) ? changes : -1;
 }

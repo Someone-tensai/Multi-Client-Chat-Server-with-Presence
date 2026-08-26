@@ -17,6 +17,8 @@
 #define CFG_DEFAULT_TLS_KEY            "server.key"
 #define CFG_DEFAULT_POOL_SHRINK_IDLE   30
 #define CFG_DEFAULT_POOL_MIN_THREADS   2
+#define CFG_DEFAULT_LOG_LEVEL          "INFO"
+#define CFG_DEFAULT_LOG_FILE           ""
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Runtime config struct — one global instance populated at startup
@@ -35,6 +37,8 @@ typedef struct {
     char   tls_key[256];
     int    pool_shrink_idle_sec;
     int    pool_min_threads;
+    char   log_level[16];
+    char   log_file[256];
 } server_config_t;
 
 // ─────────────────────────────────────────────────────────────────────────────

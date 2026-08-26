@@ -3,6 +3,7 @@
 #include "../include/threadpool.h"
 #include "../include/protocol.h"
 #include "../include/db.h"
+#include "../include/log.h"
 #include <pthread.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -22,7 +23,7 @@ static SSL_CTX *tls_init(const char *cert_file, const char *key_file)
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx)
     {
-        fprintf(stderr, "TLS: SSL_CTX_new failed\n");
+        LOG_ERROR("TLS: SSL_CTX_new failed");
         ERR_print_errors_fp(stderr);
         return NULL;
     }
@@ -30,16 +31,13 @@ static SSL_CTX *tls_init(const char *cert_file, const char *key_file)
     if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) <= 0 ||
         SSL_CTX_use_PrivateKey_file (ctx, key_file,  SSL_FILETYPE_PEM) <= 0)
     {
-        printf("TLS: certificate files not found (%s / %s) — TLS disabled\n"
-               "     To enable TLS, generate a self-signed cert:\n"
-               "       openssl req -x509 -newkey rsa:2048 -keyout server.key \\\n"
-               "                   -out server.crt -days 365 -nodes -subj '/CN=localhost'\n",
-               cert_file, key_file);
+        LOG_WARN("TLS: certificate files not found (%s / %s) — TLS disabled", cert_file, key_file);
+        LOG_INFO("To enable TLS, generate a self-signed cert: openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=localhost'");
         SSL_CTX_free(ctx);
         return NULL;
     }
 
-    printf("TLS: loaded certificate and key\n");
+    LOG_INFO("TLS: loaded certificate and key");
     return ctx;
 }
 
@@ -76,9 +74,6 @@ ssize_t conn_send(conn_t *conn, const char *buf, size_t len)
                 continue;   // signal interrupted, retry
             if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
-                // Kernel buffer temporarily full — brief pause then retry.
-                // This is acceptable because we are inside a dedicated
-                // worker thread processing this connection.
                 struct timespec ts = {0, 1000000L}; // 1 ms
                 nanosleep(&ts, NULL);
                 continue;
@@ -134,7 +129,7 @@ static void epoll_add(int epoll_fd, conn_t *conn)
     ev.events   = EPOLLIN | EPOLLRDHUP | EPOLLONESHOT;
     ev.data.ptr = conn;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, conn->fd, &ev) < 0)
-        perror("epoll_ctl ADD");
+        LOG_ERROR_ERRNO("epoll_ctl ADD");
 }
 
 void epoll_rearm(conn_t *conn)
@@ -172,7 +167,13 @@ int main(int argc, char *argv[])
     else
         printf("No config file found — using defaults\n");
 
+    // Initialize logging early so subsequent startup logs are captured
+    log_init(cfg.log_level, cfg.log_file);
+    LOG_INFO("Loaded config from %s (log_level=%s, log_file=%s)", conf_path, cfg.log_level, cfg.log_file[0] ? cfg.log_file : "(console)");
+
     run_server(&cfg);
+    log_close();
+    return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,19 +193,27 @@ void run_server(server_config_t *cfg)
     // ── TLS (optional) ───────────────────────────────────────────────────────
     ssl_ctx = tls_init(cfg->tls_cert, cfg->tls_key);
     if (!ssl_ctx)
-        printf("TLS disabled — running in plain-text mode\n"
-               "(generate server.crt + server.key to enable)\n");
+        LOG_INFO("TLS disabled — running in plain-text mode (generate server.crt + server.key to enable)");
+
+    // ── Registry (dynamic allocation based on config) ────────────────────────
+    if (registry_init(cfg) != 0)
+    {
+        LOG_ERROR("Failed to initialize registry — aborting");
+        exit(EXIT_FAILURE);
+    }
+    LOG_INFO("Registry initialized: rooms=%d clients=%d members=%d history=%d",
+             cfg->max_rooms, cfg->max_clients, cfg->max_members, cfg->history_size);
 
     // ── SQLite database ───────────────────────────────────────────────────────
     if (db_open() != 0)
     {
-        fprintf(stderr, "Failed to open database — aborting\n");
+        LOG_ERROR("Failed to open database — aborting");
         exit(EXIT_FAILURE);
     }
 
     // ── Server socket ─────────────────────────────────────────────────────────
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) { perror("socket"); exit(EXIT_FAILURE); }
+    if (server_fd < 0) { LOG_ERROR_ERRNO("socket"); exit(EXIT_FAILURE); }
 
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -215,27 +224,27 @@ void run_server(server_config_t *cfg)
     addr.sin_port        = htons(cfg->port);
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-        { perror("bind"); exit(EXIT_FAILURE); }
+        { LOG_ERROR_ERRNO("bind"); exit(EXIT_FAILURE); }
 
     if (listen(server_fd, BACKLOG) < 0)
-        { perror("listen"); exit(EXIT_FAILURE); }
+        { LOG_ERROR_ERRNO("listen"); exit(EXIT_FAILURE); }
 
     // ── Thread pool (dynamic) ─────────────────────────────────────────────────
     threadpool_t *pool = threadpool_create(cfg->thread_pool_size);
-    if (!pool) { perror("threadpool_create"); exit(EXIT_FAILURE); }
+    if (!pool) { LOG_ERROR_ERRNO("threadpool_create"); exit(EXIT_FAILURE); }
     pool->min_threads     = cfg->pool_min_threads;
     pool->shrink_idle_sec = cfg->pool_shrink_idle_sec;
 
     // ── epoll ─────────────────────────────────────────────────────────────────
     int epoll_fd = epoll_create1(0);
-    if (epoll_fd < 0) { perror("epoll_create1"); exit(EXIT_FAILURE); }
+    if (epoll_fd < 0) { LOG_ERROR_ERRNO("epoll_create1"); exit(EXIT_FAILURE); }
 
     struct epoll_event ev;
     ev.events   = EPOLLIN;
     ev.data.fd  = server_fd;
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
 
-    printf("Server listening on port %d (%s) — Ctrl+C to shut down\n",
+    LOG_INFO("Server listening on port %d (%s) — Ctrl+C to shut down",
            cfg->port, ssl_ctx ? "TLS" : "plain-text");
 
     struct epoll_event events[MAX_EVENTS];
@@ -248,7 +257,7 @@ void run_server(server_config_t *cfg)
         if (n < 0)
         {
             if (errno == EINTR) break;
-            perror("epoll_wait");
+            LOG_ERROR_ERRNO("epoll_wait");
             break;
         }
 
@@ -272,14 +281,14 @@ void run_server(server_config_t *cfg)
                 if (client_fd < 0)
                 {
                     if (errno != EAGAIN && errno != EWOULDBLOCK)
-                        perror("accept");
+                        LOG_ERROR_ERRNO("accept");
                     continue;
                 }
 
                 conn_t *conn = conn_create(client_fd, epoll_fd);
                 if (!conn)
                 {
-                    fprintf(stderr, "conn_create: out of memory\n");
+                    LOG_ERROR("conn_create: out of memory");
                     close(client_fd);
                     continue;
                 }
@@ -290,7 +299,7 @@ void run_server(server_config_t *cfg)
                 char greeting = ssl_ctx ? 'T' : 'P';
                 if (send(client_fd, &greeting, 1, MSG_NOSIGNAL) != 1)
                 {
-                    perror("send greeting");
+                    LOG_ERROR_ERRNO("send greeting");
                     conn_free(conn);
                     close(client_fd);
                     continue;
@@ -307,14 +316,14 @@ void run_server(server_config_t *cfg)
                     if (SSL_accept(conn->ssl) <= 0)
                     {
                         ERR_print_errors_fp(stderr);
+                        LOG_ERROR("TLS SSL_accept failed");
                         conn_free(conn);
                         close(client_fd);
                         continue;
                     }
                 }
 
-                printf("New client connected (fd=%d%s)\n",
-                       client_fd, ssl_ctx ? ", TLS" : "");
+                LOG_INFO("New client connected (fd=%d%s)", client_fd, ssl_ctx ? ", TLS" : "");
 
                 epoll_add(epoll_fd, conn);
                 continue;
@@ -328,7 +337,7 @@ void run_server(server_config_t *cfg)
 
             if (threadpool_submit(pool, conn) != 0)
             {
-                fprintf(stderr, "threadpool_submit failed (queue full?)\n");
+                LOG_ERROR("threadpool_submit failed (queue full?)");
                 if (!conn->closing)
                     epoll_rearm(conn);
             }
@@ -336,7 +345,7 @@ void run_server(server_config_t *cfg)
     }
 
     // ── Graceful shutdown ─────────────────────────────────────────────────────
-    printf("\nShutting down — notifying clients...\n");
+    LOG_INFO("Shutting down — notifying clients...");
 
     char msg[MAX_LINE_LEN];
     snprintf(msg, sizeof(msg), "ERR %s\n", ERR_SERVER_SHUTDOWN);
@@ -351,9 +360,10 @@ void run_server(server_config_t *cfg)
     close(server_fd);
 
     db_close();
+    registry_destroy();
 
     if (ssl_ctx)
         SSL_CTX_free(ssl_ctx);
 
-    printf("Server shut down cleanly.\n");
+    LOG_INFO("Server shut down cleanly.");
 }
