@@ -571,9 +571,10 @@ static void print_help(void)
     display_system("  KICK <user>          - kick a user (admin only)");
     display_system("  PROMOTE <user>       - make a user admin (admin only)");
     display_system("  STATUS <ONLINE|AWAY|BUSY> - set your presence status");
-    display_system("  EDIT <id> <text>     - edit your message");
-    display_system("  DELETE <id>          - delete a message");
-    display_system("  HISTORY [room] [cursor] [limit] - view message history");
+    display_system("  EDIT <id> <text>     - edit own message (by id)");
+    display_system("  DELETE <id>          - delete own message (admin can delete any)");
+    display_system("  HISTORY <room> [cursor] [limit] - paginated history (cursor=id)");
+    display_system("  SEARCH <room> <query> - search messages in room");
     display_system("  READ <msg_id>        - mark message as read (receipt)");
     display_system("  TYPING               - broadcast typing indicator");
     display_system("  STOP_TYPING          - stop typing indicator");
@@ -583,8 +584,9 @@ static void print_help(void)
     display_system("  LOGOUT_ALL           - logout all sessions");
     display_system("  /help                - show this help");
     display_system("  /quit                - disconnect and exit");
-    display_system("Pagination: e.g. WHO 0 10, ROOMS 0 10");
+    display_system("Pagination: e.g. WHO 0 10, ROOMS 0 10, HISTORY demoRoom 0 20");
     display_system("Session: after REGISTER/LOGIN, save the token for RECONNECT");
+    display_system("Message IDs shown as [id] in MSG, use for EDIT/DELETE");
 }
 
 // ─────────────────────────────────────────────
