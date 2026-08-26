@@ -4,6 +4,15 @@
 #include "../include/protocol.h"
 #include "../include/db.h"
 #include "../include/log.h"
+#include "../include/session.h"
+#include "../include/receipt.h"
+#include "../include/presence.h"
+#include "../include/block.h"
+#include "../include/permission.h"
+#include "../include/invite.h"
+#include "../include/redis.h"
+#include "../include/pg.h"
+#include "../include/metrics.h"
 #include <pthread.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -37,7 +46,12 @@ static SSL_CTX *tls_init(const char *cert_file, const char *key_file)
         return NULL;
     }
 
-    LOG_INFO("TLS: loaded certificate and key");
+    // Phase 17-18: TLS hardening — minimum TLS 1.2, strong ciphers
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_cipher_list(ctx, "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!MD5:!DSS");
+    SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
+
+    LOG_INFO("TLS: loaded certificate and key (TLS >= 1.2, hardened ciphers)");
     return ctx;
 }
 
@@ -141,14 +155,82 @@ void epoll_rearm(conn_t *conn)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SIGINT
+// SIGINT / SIGTERM — graceful shutdown
 // ─────────────────────────────────────────────────────────────────────────────
 static volatile sig_atomic_t shutdown_flag = 0;
 
-static void handle_sigint(int sig)
+static void handle_shutdown_signal(int sig)
 {
     (void)sig;
     shutdown_flag = 1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Login rate limiter (Phase 17-18) — per-IP brute-force protection
+// ─────────────────────────────────────────────────────────────────────────────
+#define LOGIN_RATE_WINDOW   60   // seconds
+#define LOGIN_RATE_MAX      10   // max attempts per window
+#define LOGIN_LOCKOUT_SEC  300   // 5 minute lockout
+
+typedef struct {
+    char ip[46];
+    int  attempts;
+    time_t window_start;
+    time_t lockout_until;
+} login_rate_entry_t;
+
+#define MAX_RATE_ENTRIES 256
+static login_rate_entry_t login_rates[MAX_RATE_ENTRIES];
+static int login_rate_count = 0;
+static pthread_mutex_t login_rate_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static login_rate_entry_t *find_login_rate(const char *ip)
+{
+    for (int i = 0; i < login_rate_count; i++) {
+        if (strcmp(login_rates[i].ip, ip) == 0)
+            return &login_rates[i];
+    }
+    if (login_rate_count < MAX_RATE_ENTRIES) {
+        login_rate_entry_t *e = &login_rates[login_rate_count++];
+        strncpy(e->ip, ip, sizeof(e->ip) - 1);
+        e->ip[sizeof(e->ip) - 1] = '\0';
+        e->attempts = 0;
+        e->window_start = 0;
+        e->lockout_until = 0;
+        return e;
+    }
+    return NULL;
+}
+
+int server_check_login_rate(const char *ip)
+{
+    if (!ip) return 0;
+    time_t now = time(NULL);
+    pthread_mutex_lock(&login_rate_lock);
+    login_rate_entry_t *e = find_login_rate(ip);
+    if (!e) { pthread_mutex_unlock(&login_rate_lock); return 0; }
+
+    if (e->lockout_until > 0 && now < e->lockout_until) {
+        pthread_mutex_unlock(&login_rate_lock);
+        return -1; // locked out
+    }
+    if (e->lockout_until > 0 && now >= e->lockout_until) {
+        e->attempts = 0;
+        e->lockout_until = 0;
+        e->window_start = now;
+    }
+    if ((now - e->window_start) > LOGIN_RATE_WINDOW) {
+        e->attempts = 0;
+        e->window_start = now;
+    }
+    e->attempts++;
+    if (e->attempts > LOGIN_RATE_MAX) {
+        e->lockout_until = now + LOGIN_LOCKOUT_SEC;
+        pthread_mutex_unlock(&login_rate_lock);
+        return -1; // lockout
+    }
+    pthread_mutex_unlock(&login_rate_lock);
+    return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -183,12 +265,13 @@ int main(int argc, char *argv[])
 
 void run_server(server_config_t *cfg)
 {
-    // Install SIGINT handler
+    // Install SIGINT + SIGTERM handlers (Phase 34: graceful shutdown)
     struct sigaction sa;
-    sa.sa_handler = handle_sigint;
+    sa.sa_handler = handle_shutdown_signal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
 
     // ── TLS (optional) ───────────────────────────────────────────────────────
     ssl_ctx = tls_init(cfg->tls_cert, cfg->tls_key);
@@ -210,6 +293,48 @@ void run_server(server_config_t *cfg)
         LOG_ERROR("Failed to open database — aborting");
         exit(EXIT_FAILURE);
     }
+
+    // ── Read receipts (Phase 6) ──────────────────────────────────────────────
+    if (receipt_init() != 0)
+    {
+        LOG_WARN("Failed to initialize read receipts — receipts disabled");
+    }
+
+    // ── Presence subsystem (Phase 7) ─────────────────────────────────────────
+    if (presence_init() != 0)
+    {
+        LOG_WARN("Failed to initialize presence — typing indicators disabled");
+    }
+
+    // ── Block/Mute/Ban (Phase 8) ─────────────────────────────────────────────
+    if (block_init() != 0)
+    {
+        LOG_WARN("Failed to initialize block subsystem — blocking disabled");
+    }
+
+    // ── Permissions (Phase 9) ────────────────────────────────────────────────
+    if (permission_init() != 0)
+    {
+        LOG_WARN("Failed to initialize permissions — role system disabled");
+    }
+
+    // ── Invites (Phase 11) ───────────────────────────────────────────────────
+    if (invite_init() != 0)
+    {
+        LOG_WARN("Failed to initialize invites — invitation system disabled");
+    }
+
+    // ── Metrics (Phase 25-26) ────────────────────────────────────────────────
+    metrics_init();
+    LOG_INFO("Metrics subsystem initialized");
+
+    // ── Redis (Phase 19-22, optional) ────────────────────────────────────────
+    redis_config_t redis_cfg = { .host = "127.0.0.1", .port = 6379, .enabled = 0 };
+    redis_init(&redis_cfg);
+
+    // ── PostgreSQL (Phase 23-24, optional) ────────────────────────────────────
+    pg_config_t pg_cfg = { .dsn = "", .enabled = 0 };
+    pg_init(&pg_cfg);
 
     // ── Server socket ─────────────────────────────────────────────────────────
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -249,6 +374,7 @@ void run_server(server_config_t *cfg)
 
     struct epoll_event events[MAX_EVENTS];
     time_t last_shrink_check = time(NULL);
+    time_t last_presence_cleanup = time(NULL);
 
     while (!shutdown_flag)
     {
@@ -267,6 +393,13 @@ void run_server(server_config_t *cfg)
         {
             threadpool_maybe_shrink(pool);
             last_shrink_check = now;
+        }
+
+        // ── Periodic typing indicator cleanup (auto-stop stale states) ───
+        if (now - last_presence_cleanup >= 5)
+        {
+            presence_cleanup_stale();
+            last_presence_cleanup = now;
         }
 
         for (int i = 0; i < n; i++)
@@ -344,17 +477,27 @@ void run_server(server_config_t *cfg)
         }
     }
 
-    // ── Graceful shutdown ─────────────────────────────────────────────────────
-    LOG_INFO("Shutting down — notifying clients...");
+    // ── Phase 34: Graceful shutdown ─────────────────────────────────────────────
+    // Step 1: Stop accepting new connections
+    LOG_INFO("Shutting down — stopping accept loop...");
+    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, server_fd, NULL);
 
+    // Step 2: Notify all connected clients
+    LOG_INFO("Notifying connected clients...");
     char msg[MAX_LINE_LEN];
     snprintf(msg, sizeof(msg), "ERR %s\n", ERR_SERVER_SHUTDOWN);
     notify_all_clients(msg);
 
-    struct timespec wait = {0, 200000000L};
-    nanosleep(&wait, NULL);
+    // Step 3: Drain — wait for in-flight messages to flush
+    struct timespec drain = {0, 500000000L}; // 500ms
+    nanosleep(&drain, NULL);
 
+    // Step 4: Destroy thread pool (waits for all workers)
     threadpool_destroy(pool);
+
+    // Step 5: Cleanup Redis/PG connections
+    redis_close();
+    pg_close();
 
     close(epoll_fd);
     close(server_fd);

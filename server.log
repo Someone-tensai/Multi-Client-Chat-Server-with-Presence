@@ -1,0 +1,92 @@
+2026-08-26 18:42:33 [INFO] src/server.c:175 (main) Loaded config from server.conf (log_level=INFO, log_file=server.log)
+2026-08-26 18:42:33 [WARN] src/server.c:37 (tls_init) TLS: certificate files not found (server.crt / server.key) — TLS disabled
+2026-08-26 18:42:33 [INFO] src/server.c:38 (tls_init) To enable TLS, generate a self-signed cert: openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=localhost'
+2026-08-26 18:42:33 [INFO] src/server.c:199 (run_server) TLS disabled — running in plain-text mode (generate server.crt + server.key to enable)
+2026-08-26 18:42:33 [INFO] src/server.c:207 (run_server) Registry initialized: rooms=16 clients=64 members=16 history=10
+2026-08-26 18:42:33 [ERROR] src/db.c:88 (db_open) db_open schema: no such column: deleted
+2026-08-26 18:42:33 [ERROR] src/server.c:213 (run_server) Failed to open database — aborting
+2026-08-26 18:42:49 [INFO] src/server.c:175 (main) Loaded config from server.conf (log_level=INFO, log_file=server.log)
+2026-08-26 18:42:49 [WARN] src/server.c:37 (tls_init) TLS: certificate files not found (server.crt / server.key) — TLS disabled
+2026-08-26 18:42:49 [INFO] src/server.c:38 (tls_init) To enable TLS, generate a self-signed cert: openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=localhost'
+2026-08-26 18:42:49 [INFO] src/server.c:199 (run_server) TLS disabled — running in plain-text mode (generate server.crt + server.key to enable)
+2026-08-26 18:42:49 [INFO] src/server.c:207 (run_server) Registry initialized: rooms=16 clients=64 members=16 history=10
+2026-08-26 18:42:49 [ERROR] src/db.c:88 (db_open) db_open schema: no such column: deleted
+2026-08-26 18:42:49 [ERROR] src/server.c:213 (run_server) Failed to open database — aborting
+2026-08-26 18:43:55 [INFO] src/server.c:175 (main) Loaded config from server.conf (log_level=INFO, log_file=server.log)
+2026-08-26 18:43:55 [WARN] src/server.c:37 (tls_init) TLS: certificate files not found (server.crt / server.key) — TLS disabled
+2026-08-26 18:43:55 [INFO] src/server.c:38 (tls_init) To enable TLS, generate a self-signed cert: openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=localhost'
+2026-08-26 18:43:55 [INFO] src/server.c:199 (run_server) TLS disabled — running in plain-text mode (generate server.crt + server.key to enable)
+2026-08-26 18:43:55 [INFO] src/server.c:207 (run_server) Registry initialized: rooms=16 clients=64 members=16 history=10
+2026-08-26 18:43:56 [INFO] src/db.c:99 (db_open) Database opened: chat.db
+2026-08-26 18:43:56 [INFO] src/receipt.c:59 (receipt_init) Read receipt database initialized
+2026-08-26 18:43:56 [INFO] src/presence.c:55 (presence_init) Presence subsystem initialized (typing indicators enabled)
+2026-08-26 18:43:56 [INFO] src/threadpool.c:119 (threadpool_create) Thread pool started (16 workers)
+2026-08-26 18:43:56 [INFO] src/server.c:262 (run_server) Server listening on port 8888 (plain-text) — Ctrl+C to shut down
+2026-08-26 18:44:01 [INFO] src/threadpool.c:209 (threadpool_maybe_shrink) Thread pool: requesting 14 idle workers to exit (16 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 15 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 14 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 13 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 12 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 11 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 10 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 9 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 8 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 7 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 6 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 5 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 4 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 3 remain)
+2026-08-26 18:44:01 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 2 remain)
+2026-08-26 18:44:11 [INFO] src/server.c:349 (run_server) New client connected (fd=11)
+2026-08-26 18:44:25 [INFO] src/server.c:349 (run_server) New client connected (fd=12)
+2026-08-26 18:44:34 [INFO] src/client_handler.c:305 (process_line) User alice registered, session created
+2026-08-26 18:44:44 [INFO] src/client_handler.c:305 (process_line) User bob registered, session created
+2026-08-26 18:44:53 [INFO] src/client_handler.c:537 (process_line) User alice created room LOBBY
+2026-08-26 18:45:02 [INFO] src/client_handler.c:637 (process_line) User bob joined room LOBBY
+2026-08-26 18:46:07 [INFO] src/client_handler.c:1214 (process_line) User bob logging out
+2026-08-26 18:46:22 [INFO] src/client_handler.c:1214 (process_line) User alice logging out
+2026-08-26 18:46:35 [INFO] src/client_handler.c:393 (process_line) User alice logged in, session created
+2026-08-26 18:46:41 [INFO] src/client_handler.c:1214 (process_line) User alice logging out
+2026-08-26 18:46:56 [INFO] src/client_handler.c:508 (process_line) User alice reconnected, token rotated
+2026-08-26 18:47:23 [INFO] src/client_handler.c:393 (process_line) User bob logged in, session created
+2026-08-26 18:47:39 [INFO] src/session.c:74 (session_revoke) Session revoked: 3e3d96f8...
+2026-08-26 18:47:39 [INFO] src/client_handler.c:1331 (process_line) User alice revoked session 3e3d96f8...
+2026-08-26 18:47:46 [INFO] src/client_handler.c:1251 (process_line) User alice logging out all sessions
+2026-08-26 18:47:46 [INFO] src/session.c:94 (session_revoke_all) Session cleanup ran for user alice (0 expired removed)
+2026-08-26 19:54:02 [INFO] src/server.c:371 (run_server) Shutting down — notifying clients...
+2026-08-26 19:54:02 [INFO] src/server.c:391 (run_server) Server shut down cleanly.
+2026-08-26 19:54:04 [INFO] src/server.c:254 (main) Loaded config from server.conf (log_level=INFO, log_file=server.log)
+2026-08-26 19:54:04 [WARN] src/server.c:43 (tls_init) TLS: certificate files not found (server.crt / server.key) — TLS disabled
+2026-08-26 19:54:04 [INFO] src/server.c:44 (tls_init) To enable TLS, generate a self-signed cert: openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.crt -days 365 -nodes -subj '/CN=localhost'
+2026-08-26 19:54:04 [INFO] src/server.c:279 (run_server) TLS disabled — running in plain-text mode (generate server.crt + server.key to enable)
+2026-08-26 19:54:04 [INFO] src/server.c:287 (run_server) Registry initialized: rooms=16 clients=64 members=16 history=10
+2026-08-26 19:54:05 [INFO] src/db.c:99 (db_open) Database opened: chat.db
+2026-08-26 19:54:05 [INFO] src/receipt.c:59 (receipt_init) Read receipt database initialized
+2026-08-26 19:54:05 [INFO] src/presence.c:55 (presence_init) Presence subsystem initialized (typing indicators enabled)
+2026-08-26 19:54:06 [INFO] src/block.c:55 (ensure_block_db) Block/mute/ban database initialized
+2026-08-26 19:54:06 [INFO] src/permission.c:39 (ensure_perm_db) Permission database initialized
+2026-08-26 19:54:06 [INFO] src/invite.c:46 (ensure_invite_db) Invite database initialized
+2026-08-26 19:54:06 [INFO] src/server.c:329 (run_server) Metrics subsystem initialized
+2026-08-26 19:54:06 [INFO] src/redis.c:18 (redis_init) Redis disabled — running in standalone mode
+2026-08-26 19:54:06 [INFO] src/pg.c:17 (pg_init) PostgreSQL disabled — using SQLite fallback
+2026-08-26 19:54:06 [INFO] src/threadpool.c:119 (threadpool_create) Thread pool started (16 workers)
+2026-08-26 19:54:06 [INFO] src/server.c:372 (run_server) Server listening on port 8888 (plain-text) — Ctrl+C to shut down
+2026-08-26 19:54:11 [INFO] src/threadpool.c:209 (threadpool_maybe_shrink) Thread pool: requesting 14 idle workers to exit (16 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 15 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 14 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 13 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 12 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 11 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 10 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 9 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 8 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 7 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 6 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 5 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 4 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 3 remain)
+2026-08-26 19:54:11 [INFO] src/threadpool.c:47 (worker) Thread pool: worker exited (shrink, 2 remain)
+2026-08-26 19:54:12 [INFO] src/server.c:482 (run_server) Shutting down — stopping accept loop...
+2026-08-26 19:54:12 [INFO] src/server.c:486 (run_server) Notifying connected clients...
+2026-08-26 19:54:12 [INFO] src/redis.c:57 (redis_close) Redis connection closed
+2026-08-26 19:54:12 [INFO] src/server.c:511 (run_server) Server shut down cleanly.
