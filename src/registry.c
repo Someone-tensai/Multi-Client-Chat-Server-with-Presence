@@ -1,6 +1,7 @@
 #include "../include/registry.h"
 #include "../include/protocol.h"
 #include "../include/db.h"
+#include "../include/config.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -8,17 +9,136 @@
 #include <time.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Global state
+// Global state — dynamically allocated
 //   registry_lock (rwlock) — guards room_list[] and client_list[] arrays only.
 //   Each room_t has its own room_lock (mutex) for its members[] and history[].
 // ─────────────────────────────────────────────────────────────────────────────
 pthread_rwlock_t registry_lock = PTHREAD_RWLOCK_INITIALIZER;
 
-room_t   *room_list[MAX_ROOMS];
-int       room_count = 0;
+room_t   **room_list   = NULL;
+int       room_count   = 0;
+int       room_capacity = 0;
 
-client_t *client_list[MAX_CLIENTS];
+client_t **client_list = NULL;
 int       client_count = 0;
+int       client_capacity = 0;
+
+// Runtime capacities for new rooms/members/history
+static int g_max_members  = CFG_DEFAULT_MAX_MEMBERS;
+static int g_history_size = CFG_DEFAULT_HISTORY_SIZE;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Registry lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
+int registry_init(const server_config_t *cfg)
+{
+    if (!cfg) return -1;
+
+    int need_rooms   = cfg->max_rooms   > 0 ? cfg->max_rooms   : CFG_DEFAULT_MAX_ROOMS;
+    int need_clients = cfg->max_clients > 0 ? cfg->max_clients : CFG_DEFAULT_MAX_CLIENTS;
+    int need_members = cfg->max_members > 0 ? cfg->max_members : CFG_DEFAULT_MAX_MEMBERS;
+    int need_history = cfg->history_size >=0 ? cfg->history_size : CFG_DEFAULT_HISTORY_SIZE;
+
+    // If already initialized, destroy previous first (useful for tests)
+    if (room_list || client_list) {
+        registry_destroy();
+    }
+
+    room_list = calloc((size_t)need_rooms, sizeof(room_t *));
+    if (!room_list) return -1;
+    client_list = calloc((size_t)need_clients, sizeof(client_t *));
+    if (!client_list) {
+        free(room_list);
+        room_list = NULL;
+        return -1;
+    }
+
+    room_capacity   = need_rooms;
+    client_capacity = need_clients;
+    room_count   = 0;
+    client_count = 0;
+    g_max_members  = need_members;
+    g_history_size = need_history;
+
+    return 0;
+}
+
+static void registry_ensure_init(void)
+{
+    if (room_list == NULL && client_list == NULL) {
+        server_config_t def;
+        def.max_rooms   = CFG_DEFAULT_MAX_ROOMS;
+        def.max_clients = CFG_DEFAULT_MAX_CLIENTS;
+        def.max_members = CFG_DEFAULT_MAX_MEMBERS;
+        def.history_size = CFG_DEFAULT_HISTORY_SIZE;
+        def.port = CFG_DEFAULT_PORT;
+        def.thread_pool_size = CFG_DEFAULT_THREAD_POOL_SIZE;
+        def.rate_bucket_max = CFG_DEFAULT_RATE_BUCKET_MAX;
+        def.rate_refill_rate = CFG_DEFAULT_RATE_REFILL_RATE;
+        def.rate_msg_cost = CFG_DEFAULT_RATE_MSG_COST;
+        def.pool_shrink_idle_sec = CFG_DEFAULT_POOL_SHRINK_IDLE;
+        def.pool_min_threads = CFG_DEFAULT_POOL_MIN_THREADS;
+        strncpy(def.tls_cert, CFG_DEFAULT_TLS_CERT, sizeof(def.tls_cert)-1);
+        strncpy(def.tls_key, CFG_DEFAULT_TLS_KEY, sizeof(def.tls_key)-1);
+        registry_init(&def);
+    }
+}
+
+void room_destroy(room_t *room)
+{
+    if (!room) return;
+    pthread_mutex_destroy(&room->room_lock);
+    free(room->members);
+    free(room->history);
+    free(room);
+}
+
+void registry_destroy(void)
+{
+    // Acquire write lock to ensure no other thread is accessing
+    pthread_rwlock_wrlock(&registry_lock);
+
+    // Free all rooms
+    for (int i = 0; i < room_count; i++) {
+        if (room_list && room_list[i]) {
+            room_destroy(room_list[i]);
+            room_list[i] = NULL;
+        }
+    }
+    free(room_list);
+    room_list = NULL;
+    room_count = 0;
+    room_capacity = 0;
+
+    // Free all clients
+    for (int i = 0; i < client_count; i++) {
+        if (client_list && client_list[i]) {
+            free(client_list[i]);
+            client_list[i] = NULL;
+        }
+    }
+    free(client_list);
+    client_list = NULL;
+    client_count = 0;
+    client_capacity = 0;
+
+    pthread_rwlock_unlock(&registry_lock);
+    pthread_rwlock_destroy(&registry_lock);
+    // Mark that lock was destroyed so next init will re-init it
+    // Use a file-scope static to track this — we need to persist across calls
+    // Since we cannot easily modify lock_destroyed from here (it's inside registry_init's scope),
+    // we use a global static outside.
+    // Instead, we will reinitialize lock in next registry_init unconditionally after destroy.
+    // Workaround: set a global flag.
+    // We introduce a separate static variable at file scope for this.
+    // For now, we just leave lock destroyed; next registry_init will need to init it.
+    // To make it work, we set a flag in a way registry_init can detect: if room_list==NULL && client_list==NULL means destroyed.
+    // registry_init will check if registry_lock needs init by trying to re-init.
+    // Simpler: just re-init lock now to keep it usable for subsequent tests without re-init?
+    // But if we destroy, next test will call registry_init which will try to destroy again — not good.
+    // So we re-init immediately after destroy to keep lock valid for next init's destroy path.
+    pthread_rwlock_init(&registry_lock, NULL);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Shift helpers
@@ -53,7 +173,7 @@ room_t *find_room_unlocked(const char *room_name, room_err_t *err)
     }
     for (int i = 0; i < room_count; i++)
     {
-        if (strcmp(room_list[i]->room_name, room_name) == 0)
+        if (room_list[i] && strcmp(room_list[i]->room_name, room_name) == 0)
         {
             *err = ROOM_OK;
             return room_list[i];
@@ -85,10 +205,18 @@ room_t *create_room(const char *room_name, client_t *creator_client, room_err_t 
     size_t len = strlen(room_name);
     if (len == 0 || len >= MAX_ROOM_NAME_LEN) { *err = ROOM_ERR_INVALID_NAME; return NULL; }
 
+    registry_ensure_init();
+
     // Write-lock: we may add to room_list[]
     pthread_rwlock_wrlock(&registry_lock);
 
-    if (room_count >= MAX_ROOMS)
+    if (room_capacity == 0 || room_list == NULL) {
+        pthread_rwlock_unlock(&registry_lock);
+        *err = ROOM_ERR_MAX_ROOMS;
+        return NULL;
+    }
+
+    if (room_count >= room_capacity)
     {
         pthread_rwlock_unlock(&registry_lock);
         *err = ROOM_ERR_MAX_ROOMS;
@@ -102,7 +230,7 @@ room_t *create_room(const char *room_name, client_t *creator_client, room_err_t 
         return NULL;
     }
 
-    room_t *new_room = malloc(sizeof(room_t));
+    room_t *new_room = calloc(1, sizeof(room_t));
     if (!new_room)
     {
         pthread_rwlock_unlock(&registry_lock);
@@ -114,29 +242,80 @@ room_t *create_room(const char *room_name, client_t *creator_client, room_err_t 
     new_room->room_name[MAX_ROOM_NAME_LEN - 1] = '\0';
     new_room->admin_client  = creator_client;
     new_room->member_count  = 0;
+    new_room->member_capacity = g_max_members;
     new_room->history_count = 0;
     new_room->history_start = 0;
-    pthread_mutex_init(&new_room->room_lock, NULL);
+    new_room->history_capacity = g_history_size;
+
+    // Allocate members array
+    if (new_room->member_capacity > 0) {
+        new_room->members = calloc((size_t)new_room->member_capacity, sizeof(client_t *));
+        if (!new_room->members) {
+            free(new_room);
+            pthread_rwlock_unlock(&registry_lock);
+            *err = ROOM_ERR_ALLOC_FAILED;
+            return NULL;
+        }
+    } else {
+        new_room->members = NULL;
+    }
+
+    // Allocate history array
+    if (new_room->history_capacity > 0) {
+        new_room->history = calloc((size_t)new_room->history_capacity, sizeof(message_t));
+        if (!new_room->history) {
+            free(new_room->members);
+            free(new_room);
+            pthread_rwlock_unlock(&registry_lock);
+            *err = ROOM_ERR_ALLOC_FAILED;
+            return NULL;
+        }
+    } else {
+        new_room->history = NULL;
+    }
+
+    if (pthread_mutex_init(&new_room->room_lock, NULL) != 0) {
+        free(new_room->members);
+        free(new_room->history);
+        free(new_room);
+        pthread_rwlock_unlock(&registry_lock);
+        *err = ROOM_ERR_ALLOC_FAILED;
+        return NULL;
+    }
 
     // Load prior message history from DB into the in-memory circular buffer
-    db_message_t rows[HISTORY_SIZE];
-    int loaded = db_load_history(room_name, rows, HISTORY_SIZE);
-    for (int i = 0; i < loaded; i++)
-    {
-        int slot = new_room->history_count < HISTORY_SIZE
-                   ? new_room->history_count
-                   : new_room->history_start;
-        if (new_room->history_count >= HISTORY_SIZE)
-            new_room->history_start = (new_room->history_start + 1) % HISTORY_SIZE;
+    if (new_room->history_capacity > 0) {
+        db_message_t *rows = malloc(sizeof(db_message_t) * (size_t)new_room->history_capacity);
+        if (rows) {
+            int loaded = db_load_history(room_name, rows, new_room->history_capacity);
+            for (int i = 0; i < loaded; i++)
+            {
+                int cap = new_room->history_capacity;
+                int slot;
+                if (new_room->history_count < cap)
+                    slot = new_room->history_count;
+                else {
+                    slot = new_room->history_start;
+                    new_room->history_start = (new_room->history_start + 1) % cap;
+                }
 
-        strncpy(new_room->history[slot].sender, rows[i].sender, MAX_USERNAME_LEN - 1);
-        new_room->history[slot].sender[MAX_USERNAME_LEN - 1] = '\0';
-        strncpy(new_room->history[slot].text, rows[i].text, MAX_TEXT_LEN - 1);
-        new_room->history[slot].text[MAX_TEXT_LEN - 1] = '\0';
-        new_room->history[slot].timestamp = (time_t)rows[i].timestamp;
+                strncpy(new_room->history[slot].sender, rows[i].sender, MAX_USERNAME_LEN - 1);
+                new_room->history[slot].sender[MAX_USERNAME_LEN - 1] = '\0';
+                strncpy(new_room->history[slot].text, rows[i].text, MAX_TEXT_LEN - 1);
+                new_room->history[slot].text[MAX_TEXT_LEN - 1] = '\0';
+                new_room->history[slot].timestamp = (time_t)rows[i].timestamp;
 
-        if (new_room->history_count < HISTORY_SIZE)
-            new_room->history_count++;
+                if (new_room->history_count < cap)
+                    new_room->history_count++;
+                else {
+                    // history_count is total, keep incrementing? But loaded case is capped.
+                    // For loaded history, we keep capped count (not total) to avoid overflow on replay.
+                    // If we treat history_count as total, loaded should reflect stored count (capped).
+                    // We keep capped for now to match replay logic.
+                }
+            }
+            free(rows);
+        }
     }
 
     room_list[room_count++] = new_room;
@@ -157,8 +336,14 @@ void room_add_member(room_t *room, client_t *client, room_err_t *err)
 
     pthread_mutex_lock(&room->room_lock);
 
-    if (room->member_count >= MAX_MEMBERS)
+    if (room->member_count >= room->member_capacity)
     {
+        pthread_mutex_unlock(&room->room_lock);
+        *err = ROOM_ERR_MAX_MEMBERS;
+        return;
+    }
+
+    if (!room->members) {
         pthread_mutex_unlock(&room->room_lock);
         *err = ROOM_ERR_MAX_MEMBERS;
         return;
@@ -197,7 +382,8 @@ void room_remove_member(room_t *room, client_t *client, room_err_t *err)
     if (idx != room->member_count)
         shift_array_room(room, idx, room->member_count);
 
-    room->members[room->member_count] = NULL;
+    if (room->members)
+        room->members[room->member_count] = NULL;
 
     pthread_mutex_unlock(&room->room_lock);
     *err = ROOM_OK;
@@ -208,22 +394,34 @@ void room_remove_member(room_t *room, client_t *client, room_err_t *err)
 // ─────────────────────────────────────────────────────────────────────────────
 void room_broadcast(room_t *room, const char *msg, int exclude_fd)
 {
-    if (room == NULL) return;
+    if (room == NULL || msg == NULL) return;
 
-    int fds[MAX_MEMBERS];
     int count;
+    int *fds = NULL;
 
     pthread_mutex_lock(&room->room_lock);
     count = room->member_count;
-    for (int i = 0; i < count; i++)
-        fds[i] = room->members[i]->socket_fd;
+    if (count > 0 && room->members) {
+        fds = malloc(sizeof(int) * (size_t)count);
+        if (fds) {
+            for (int i = 0; i < count; i++)
+                fds[i] = room->members[i]->socket_fd;
+        } else {
+            count = 0;
+        }
+    } else {
+        count = 0;
+    }
     pthread_mutex_unlock(&room->room_lock);
+
+    if (!fds) return;
 
     for (int i = 0; i < count; i++)
     {
         if (fds[i] == exclude_fd) continue;
         send(fds[i], msg, strlen(msg), MSG_NOSIGNAL);
     }
+    free(fds);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -235,18 +433,22 @@ void room_add_history(room_t *room, const char *sender, const char *text)
 
     pthread_mutex_lock(&room->room_lock);
 
-    // Slot to write into: wraps around after HISTORY_SIZE
+    int cap = room->history_capacity;
+    if (cap <= 0 || !room->history) {
+        pthread_mutex_unlock(&room->room_lock);
+        db_save_message(room->room_name, sender, text);
+        return;
+    }
+
     int slot;
-    if (room->history_count < HISTORY_SIZE)
+    if (room->history_count < cap)
     {
-        // Buffer not full yet — just append
         slot = room->history_count;
     }
     else
     {
-        // Buffer full — overwrite the oldest slot and advance start
         slot = room->history_start;
-        room->history_start = (room->history_start + 1) % HISTORY_SIZE;
+        room->history_start = (room->history_start + 1) % cap;
     }
 
     strncpy(room->history[slot].sender, sender, MAX_USERNAME_LEN - 1);
@@ -255,8 +457,20 @@ void room_add_history(room_t *room, const char *sender, const char *text)
     room->history[slot].text[MAX_TEXT_LEN - 1] = '\0';
     room->history[slot].timestamp = time(NULL);
 
-    if (room->history_count < HISTORY_SIZE)
+    // history_count tracks total messages (capped for replay compatibility we also handle via min)
+    // We increment total, but for replay we use min(total, cap)
+    // To keep backward compat where history_count was capped, we still increment only until cap then keep tracking total via separate logic?
+    // Spec says history_count is total, so we increment always.
+    // However to avoid breaking existing replay that expects capped, we store total and replay uses min.
+    if (room->history_count < 1000000) // avoid overflow
         room->history_count++;
+    else {
+        // If overflow, wrap? Keep at cap
+        room->history_count = cap;
+    }
+    // For backwards compat, if we want capped behavior, we could cap history_count at cap.
+    // But we want total, so we keep total. To keep replay correct, room_send_history uses min(total, cap).
+    // However if total grows large, history_count will exceed cap, but replay still works.
 
     pthread_mutex_unlock(&room->room_lock);
 
@@ -273,8 +487,15 @@ void room_send_history(room_t *room, int fd)
 
     pthread_mutex_lock(&room->room_lock);
 
-    int count = room->history_count;
-    if (count == 0)
+    int cap = room->history_capacity;
+    if (cap <= 0 || !room->history) {
+        pthread_mutex_unlock(&room->room_lock);
+        return;
+    }
+
+    int total = room->history_count;
+    int stored = total < cap ? total : cap;
+    if (stored == 0)
     {
         pthread_mutex_unlock(&room->room_lock);
         return;
@@ -286,9 +507,15 @@ void room_send_history(room_t *room, int fd)
     send(fd, header, strlen(header), MSG_NOSIGNAL);
 
     // Walk from oldest to newest
-    for (int i = 0; i < count; i++)
+    // When total < cap, start is 0, so idx = i
+    // When total >= cap, start points to oldest, so idx = (start + i) % cap
+    for (int i = 0; i < stored; i++)
     {
-        int idx = (room->history_start + i) % HISTORY_SIZE;
+        int idx;
+        if (total < cap)
+            idx = i;
+        else
+            idx = (room->history_start + i) % cap;
         char line[MAX_LINE_LEN];
         format_msg_reply(line, sizeof(line),
                          room->history[idx].sender,
@@ -336,8 +563,7 @@ void delete_room(room_t *room, room_err_t *err)
     room_list[room_count] = NULL;
     pthread_rwlock_unlock(&registry_lock);
 
-    pthread_mutex_destroy(&room->room_lock);
-    free(room);
+    room_destroy(room);
     *err = ROOM_OK;
 }
 
@@ -366,15 +592,28 @@ void room_delete_if_empty(room_t *room)
 // ─────────────────────────────────────────────────────────────────────────────
 void notify_all_clients(const char *msg)
 {
+    if (!msg) return;
+    int count;
+    int *fds = NULL;
     pthread_rwlock_rdlock(&registry_lock);
-    int fds[MAX_CLIENTS];
-    int count = client_count;
-    for (int i = 0; i < count; i++)
-        fds[i] = client_list[i]->socket_fd;
+    count = client_count;
+    if (count > 0 && client_list) {
+        fds = malloc(sizeof(int) * (size_t)count);
+        if (fds) {
+            for (int i = 0; i < count; i++)
+                fds[i] = client_list[i]->socket_fd;
+        } else {
+            count = 0;
+        }
+    } else {
+        count = 0;
+    }
     pthread_rwlock_unlock(&registry_lock);
 
+    if (!fds) return;
     for (int i = 0; i < count; i++)
         send(fds[i], msg, strlen(msg), MSG_NOSIGNAL);
+    free(fds);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -386,7 +625,7 @@ client_t *find_client_unlocked(const char *username, client_err_t *err)
 
     for (int i = 0; i < client_count; i++)
     {
-        if (strcmp(client_list[i]->client_name, username) == 0)
+        if (client_list[i] && strcmp(client_list[i]->client_name, username) == 0)
         {
             *err = CLIENT_OK;
             return client_list[i];
@@ -415,9 +654,17 @@ client_t *create_client(int socket_fd, const char *client_name, client_err_t *er
     size_t len = strlen(client_name);
     if (len == 0 || len >= MAX_USERNAME_LEN) { *err = CLIENT_ERR_INVALID_NAME; return NULL; }
 
+    registry_ensure_init();
+
     pthread_rwlock_wrlock(&registry_lock);
 
-    if (client_count >= MAX_CLIENTS)
+    if (client_capacity == 0 || client_list == NULL) {
+        pthread_rwlock_unlock(&registry_lock);
+        *err = CLIENT_ERR_MAX_CLIENTS;
+        return NULL;
+    }
+
+    if (client_count >= client_capacity)
     {
         pthread_rwlock_unlock(&registry_lock);
         *err = CLIENT_ERR_MAX_CLIENTS;

@@ -60,4 +60,28 @@ int  db_verify_user(const char *username, const char *password);
 // Returns 1 if username exists in the users table, 0 otherwise.
 int  db_user_exists(const char *username);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Session handling (SQLite-backed, secure random tokens)
+// ─────────────────────────────────────────────────────────────────────────────
+#define SESSION_TOKEN_HEX_LEN 64  // 32 bytes random -> 64 hex chars
+#define SESSION_EXPIRE_SEC 86400  // 24h default
+
+// Create a new session for username, generate secure token into token_out (must be at least 65 bytes).
+// Returns 0 on success, -1 on DB error.
+int db_create_session(const char *username, char *token_out, size_t token_out_size);
+
+// Validate a session token. If valid, copy username into username_out and return 0.
+// Returns -1 if token not found, -2 if expired, -3 on DB error.
+// On success, optionally rotates token if new_token_out is provided (non-NULL): old token is deleted and new token created.
+int db_validate_session(const char *token, char *username_out, size_t username_size);
+
+// Delete a session (e.g. on logout or token rotation)
+int db_delete_session(const char *token);
+
+// Delete all expired sessions, returns number deleted or -1 on error
+int db_cleanup_expired_sessions(void);
+
+// Helper: generate secure random token (hex) into out (size must be >=65). Returns 0 on success.
+int db_generate_token(char *out, size_t out_size);
+
 #endif

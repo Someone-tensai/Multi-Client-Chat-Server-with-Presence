@@ -23,10 +23,20 @@ cmd parse_incoming_command_server(char* line)
     if (strcmp(command, CMD_WHO) == 0)
     {
         incoming_command.type = TYPE_WHO;
+        // Optional pagination args: WHO <offset> <limit>
+        incoming_command.arg1 = strtok(NULL, delim); // offset or NULL
+        incoming_command.arg2 = strtok(NULL, delim); // limit or NULL
     }
     else if (strcmp(command, CMD_ROOMS) == 0)
     {
         incoming_command.type = TYPE_ROOMS;
+        incoming_command.arg1 = strtok(NULL, delim); // offset
+        incoming_command.arg2 = strtok(NULL, delim); // limit
+    }
+    else if (strcmp(command, CMD_RECONNECT) == 0)
+    {
+        incoming_command.type = TYPE_RECONNECT;
+        incoming_command.arg1 = strtok(NULL, delim); // token
     }
     else if (strcmp(command, CMD_REGISTER) == 0)
     {
@@ -93,6 +103,14 @@ cmd parse_incoming_command_server(char* line)
 void format_ok_reply(char *out, size_t out_size, const char *status)
 {
     snprintf(out, out_size, "%s %s\n", REPLY_OK, status);
+}
+
+void format_ok_session(char *out, size_t out_size, const char *status, const char *token)
+{
+    if (token && token[0] != '\0')
+        snprintf(out, out_size, "%s %s %s\n", REPLY_OK, status, token);
+    else
+        snprintf(out, out_size, "%s %s\n", REPLY_OK, status);
 }
 
 void format_err_reply(char *out, size_t out_size, const char *err_code)
