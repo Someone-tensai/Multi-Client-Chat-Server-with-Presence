@@ -5,8 +5,6 @@
 
 // ─────────────────────────────────────────────
 // Worker thread loop
-// Each worker blocks on not_empty, pops a job,
-// releases the lock, then handles the client.
 // ─────────────────────────────────────────────
 static void *worker(void *arg)
 {
@@ -16,18 +14,15 @@ static void *worker(void *arg)
     {
         pthread_mutex_lock(&pool->lock);
 
-        // Wait until there is work or a shutdown signal
         while (pool->queue_size == 0 && !pool->shutdown)
             pthread_cond_wait(&pool->not_empty, &pool->lock);
 
-        // Exit if shutting down and nothing left to do
         if (pool->shutdown && pool->queue_size == 0)
         {
             pthread_mutex_unlock(&pool->lock);
             return NULL;
         }
 
-        // Pop the front job
         job_t *job  = pool->head;
         pool->head  = job->next;
         if (pool->head == NULL)
@@ -36,21 +31,24 @@ static void *worker(void *arg)
 
         pthread_mutex_unlock(&pool->lock);
 
-        // Handle the client — this blocks until the client disconnects
-        handle_client(job->client_fd);
+        // Process one burst of data from this connection.
+        // Unlike the old model this does NOT block for the entire client
+        // lifetime — it reads what is available, processes it, re-arms
+        // epoll, and returns so the worker is free for the next job.
+        handle_client(job->conn);
         free(job);
     }
 }
 
 // ─────────────────────────────────────────────
-// Create pool and spawn worker threads
+// Create pool and spawn workers
 // ─────────────────────────────────────────────
 threadpool_t *threadpool_create(int thread_count)
 {
     threadpool_t *pool = malloc(sizeof(threadpool_t));
     if (!pool) return NULL;
 
-    pool->threads      = malloc(sizeof(pthread_t) * thread_count);
+    pool->threads = malloc(sizeof(pthread_t) * thread_count);
     if (!pool->threads) { free(pool); return NULL; }
 
     pool->thread_count = thread_count;
@@ -67,7 +65,6 @@ threadpool_t *threadpool_create(int thread_count)
         if (pthread_create(&pool->threads[i], NULL, worker, pool) != 0)
         {
             perror("threadpool: pthread_create failed");
-            // Shutdown however many threads already started
             pool->thread_count = i;
             threadpool_destroy(pool);
             return NULL;
@@ -79,21 +76,20 @@ threadpool_t *threadpool_create(int thread_count)
 }
 
 // ─────────────────────────────────────────────
-// Submit a new client fd to the queue
+// Submit a ready connection to the queue
 // ─────────────────────────────────────────────
-int threadpool_submit(threadpool_t *pool, int client_fd)
+int threadpool_submit(threadpool_t *pool, conn_t *conn)
 {
     if (!pool || pool->shutdown) return -1;
 
     job_t *job = malloc(sizeof(job_t));
     if (!job) return -1;
 
-    job->client_fd = client_fd;
-    job->next      = NULL;
+    job->conn = conn;
+    job->next = NULL;
 
     pthread_mutex_lock(&pool->lock);
 
-    // Append to tail
     if (pool->tail == NULL)
         pool->head = job;
     else
@@ -101,7 +97,6 @@ int threadpool_submit(threadpool_t *pool, int client_fd)
     pool->tail = job;
     pool->queue_size++;
 
-    // Wake one sleeping worker
     pthread_cond_signal(&pool->not_empty);
     pthread_mutex_unlock(&pool->lock);
 
@@ -109,7 +104,7 @@ int threadpool_submit(threadpool_t *pool, int client_fd)
 }
 
 // ─────────────────────────────────────────────
-// Signal shutdown, wake all workers, join them
+// Signal shutdown, wait for workers, free pool
 // ─────────────────────────────────────────────
 void threadpool_destroy(threadpool_t *pool)
 {
@@ -117,13 +112,12 @@ void threadpool_destroy(threadpool_t *pool)
 
     pthread_mutex_lock(&pool->lock);
     pool->shutdown = 1;
-    pthread_cond_broadcast(&pool->not_empty);  // wake all sleeping workers
+    pthread_cond_broadcast(&pool->not_empty);
     pthread_mutex_unlock(&pool->lock);
 
     for (int i = 0; i < pool->thread_count; i++)
         pthread_join(pool->threads[i], NULL);
 
-    // Drain any remaining queued jobs (free unprocessed fds)
     job_t *j = pool->head;
     while (j)
     {

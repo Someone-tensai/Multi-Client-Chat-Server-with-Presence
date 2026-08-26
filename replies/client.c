@@ -3,13 +3,58 @@
 #include "../include/protocol.h"
 #include "../include/display.h"
 #include <pthread.h>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 // ─────────────────────────────────────────────
 // Shared state
 // ─────────────────────────────────────────────
-static int    server_fd   = -1;          // socket to the server
-static char   current_room[MAX_ROOM_NAME_LEN] = "";   // track current room for display
-static volatile int running = 1;         // set to 0 to stop both threads
+static int    server_fd   = -1;
+static SSL   *ssl         = NULL;    // NULL in plain-text mode
+static char   current_room[MAX_ROOM_NAME_LEN] = "";
+static volatile int running = 1;
+
+// ─────────────────────────────────────────────
+// TLS — try to connect with TLS; fall back to
+// plain-text if the server doesn't speak TLS.
+// ─────────────────────────────────────────────
+static SSL *tls_connect(int fd)
+{
+    SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) return NULL;
+
+    // Accept self-signed certs (the server uses one by default)
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+
+    SSL *s = SSL_new(ctx);
+    SSL_CTX_free(ctx);   // SSL holds a reference; CTX can be freed now
+    if (!s) return NULL;
+
+    SSL_set_fd(s, fd);
+    if (SSL_connect(s) <= 0)
+    {
+        ERR_print_errors_fp(stderr);
+        SSL_free(s);
+        return NULL;
+    }
+    return s;
+}
+
+// ─────────────────────────────────────────────
+// Thin wrappers so receiver and sender don't
+// have to care whether TLS is active.
+// ─────────────────────────────────────────────
+static ssize_t client_recv(char *buf, size_t len)
+{
+    if (ssl) return (ssize_t)SSL_read(ssl, buf, (int)len);
+    return recv(server_fd, buf, len, 0);
+}
+
+static ssize_t client_send(const char *buf, size_t len)
+{
+    if (ssl) return (ssize_t)SSL_write(ssl, buf, (int)len);
+    return send(server_fd, buf, len, 0);
+}
 
 // ─────────────────────────────────────────────
 // Helper: parse one token from a string
@@ -43,6 +88,8 @@ static void handle_server_line(char *line)
 
         if (strcmp(status, OK_REGISTERED) == 0)
             display_system("Registered successfully.");
+        else if (strcmp(status, OK_LOGGED_IN) == 0)
+            display_system("Logged in successfully.");
         else if (strcmp(status, OK_CREATED) == 0)
             display_system("Room created. You are now in it.");
         else if (strcmp(status, OK_JOINED) == 0)
@@ -227,7 +274,7 @@ static void *receiver_thread(void *arg)
     char buf[READ_BUFFER_SIZE];
     ssize_t n;
 
-    while (running && (n = recv(server_fd, buf, sizeof(buf) - 1, 0)) > 0)
+    while (running && (n = client_recv(buf, sizeof(buf) - 1)) > 0)
     {
         buf[n] = '\0';
 
@@ -310,6 +357,13 @@ int main(int argc, char *argv[])
 
     display_system("Connected to chat server. Type /help for commands.");
 
+    // Attempt TLS handshake; fall back to plain-text if server is plain
+    ssl = tls_connect(server_fd);
+    if (ssl)
+        display_system("TLS connection established.");
+    else
+        display_system("Plain-text connection (TLS not available).");
+
     // Start receiver thread
     pthread_t tid;
     pthread_create(&tid, NULL, receiver_thread, NULL);
@@ -347,7 +401,7 @@ int main(int argc, char *argv[])
         // Send to server (append \n so server gets a complete line)
         char out[READ_BUFFER_SIZE + 2];
         snprintf(out, sizeof(out), "%s\n", input);
-        if (send(server_fd, out, strlen(out), 0) < 0)
+        if (client_send(out, strlen(out)) < 0)
         {
             display_system("Failed to send. Disconnected?");
             break;
@@ -355,6 +409,7 @@ int main(int argc, char *argv[])
     }
 
     running = 0;
+    if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); }
     close(server_fd);
     return 0;
 }
