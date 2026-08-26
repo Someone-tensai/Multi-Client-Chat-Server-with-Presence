@@ -54,53 +54,46 @@ Do **not** touch `src/server.c`, `src/threadpool.c`, or `src/display.c` — thos
 
 ### Janak — Application & Config Layer
 
-**Tasks: Config file + Dynamic thread pool**
+**Tasks: Config file + Dynamic thread pool** ✅ DONE
 
-These are application-level changes. Config touches startup only (`src/server.c` main entry, a new `src/config.c`). Dynamic pool is self-contained in `src/threadpool.c` and `include/threadpool.h`.
-
-| Task | Files to touch |
-|---|---|
-| Config file (`server.conf`) | New `src/config.c`, new `include/config.h`, `src/server.c` (read config at startup) |
-| Dynamic thread pool | `src/threadpool.c`, `include/threadpool.h` |
+| Task | Status | Files |
+|---|---|---|
+| Config file (`server.conf`) | ✅ Complete | New `src/config.c`, new `include/config.h`, `src/server.c` |
+| Dynamic thread pool | ✅ Complete | `src/threadpool.c`, `include/threadpool.h` |
 
 **Branch:** `feature/janak-config-pool`
 
-Do config first — parse key=value pairs at startup and override the `#define` constants. Example `server.conf`:
-```
-port = 8888
-thread_pool_size = 16
-max_clients = 64
-rate_bucket_max = 5
-rate_refill_rate = 1.0
-```
+**What was implemented:**
 
-Then do the dynamic pool — add idle tracking, a high-water threshold to spawn workers, and a timeout to shrink. The pool is already isolated in `threadpool.c` so this will not touch any other file.
+1. **Config file parser** — `src/config.c` / `include/config.h`: Parses `server.conf` (key=value format) at startup. Supports all runtime-tunable parameters: port, thread pool size, max clients/rooms/members, history size, rate limiting, TLS cert/key paths, and pool resize settings. Missing keys fall back to compile-time defaults. Accepts an optional command-line argument for the config path (`./server myconfig.conf`).
 
-Do **not** touch `src/registry.c`, `src/client_handler.c`, or `src/protocol.c` — those are Srijal's territory.
+2. **Dynamic thread pool** — `src/threadpool.c` / `include/threadpool.h`: Pool starts at `thread_pool_size` and auto-scales:
+   - **Scale-up:** When `queue_size > thread_count` and below `max_threads`, new workers are spawned on the fly.
+   - **Shrink (idle timeout):** Workers that have been idle longer than `pool_shrink_idle_sec` exit, down to `pool_min_threads`.
+   - **Shrink (explicit):** `threadpool_maybe_shrink()` called every 5s from the epoll loop; signals excess idle workers to exit when queue is empty.
+   - Thread-safe: all resize operations happen under the pool mutex; worker join via `pthread_join` in destroy is safe with a snapshot of `thread_count`.
 
 ---
 
 ### Summary Table
 
-| Person | Branch | Files owned | Tasks |
-|---|---|---|---|
-| **Sulav** | `feature/sulav-infra` | `src/server.c`, `src/threadpool.c`, TLS wrappers | epoll, TLS |
-| **Srijal** | `feature/srijal-persistence` | `src/registry.c`, `src/db.c`, `include/db.h` | SQLite history, auth |
-| **Janak** | `feature/janak-config-pool` | `src/config.c`, `include/config.h`, `src/threadpool.c` | Config file, dynamic pool |
-
-> **Note:** Sulav and Janak both touch `src/threadpool.c`. Coordinate on this — Janak owns the dynamic pool logic, Sulav only changes how the pool is *called* from `src/server.c`. As long as Sulav does not modify `threadpool.c` internals and Janak does not modify `server.c`, there is no conflict.
+| Person | Branch | Files owned | Tasks | Status |
+|---|---|---|---|---|
+| **Sulav** | `feature/sulav-infra` | `src/server.c`, `src/threadpool.c`, TLS wrappers | epoll, TLS | ✅ Done |
+| **Srijal** | `feature/srijal-persistence` | `src/registry.c`, `src/db.c`, `include/db.h` | SQLite history, auth | ✅ Done |
+| **Janak** | `feature/janak-config-pool` | `src/config.c`, `include/config.h`, `src/threadpool.c` | Config file, dynamic pool | ✅ Done |
 
 ---
 
 ### Integration Order
 
-To avoid merge conflicts when all three branches come together:
+All three feature branches are now complete. The merge order:
 
-1. **Janak merges first** — config and pool changes are foundational, no one depends on them
-2. **Srijal merges second** — persistence and auth sit on top of stable registry and config
-3. **Sulav merges last** — epoll and TLS are transport-level and wrap everything else
+1. **Janak merges first** — config and pool changes are foundational; rebase `feature/janak-config-pool` onto `main`, open PR
+2. **Srijal merges second** — persistence and auth sit on top of stable registry and config; rebase `feature/srijal-persistence` onto updated `main`, open PR
+3. **Sulav merges last** — epoll and TLS are transport-level and wrap everything else; rebase `feature/sulav-infra` onto updated `main`, open PR
 
-Each person should rebase onto `main` before opening their PR.
+> **Note:** `origin/janak-branch` contains only an old Makefile fill-in and a naive per-thread `pthread_create` approach (superseded by the threadpool). The actual config + dynamic pool work was done directly on the current codebase and should be committed to a new branch or force-pushed to `feature/janak-config-pool`.
 
 ---
 
@@ -115,7 +108,8 @@ make clean    # removes binaries
 ```
 
 ```bash
-./server                  # starts server on port 8888
+./server                  # starts server on port 8888 (reads server.conf)
+./server myconfig.conf    # starts server with a custom config file
 ./client                  # connects to 127.0.0.1:8888
 ./client <host> <port>    # connect to a remote server
 ```
@@ -131,21 +125,27 @@ include/
   registry.h      — client_t, room_t, message_t structs, all registry API declarations
   server.h        — run_server(), handle_client() declarations
   display.h       — display_*() function declarations
-  threadpool.h    — threadpool_t struct and API
+  threadpool.h    — threadpool_t struct and API (dynamic resize)
+  config.h        — server_config_t struct, config_load(), config_get()
+  db.h            — SQLite persistence API
 
 src/
-  server.c        — main(), run_server(), SIGINT handler
+  server.c        — main(), run_server(), SIGINT handler, config integration
   client_handler.c — per-client command dispatch loop (all commands implemented)
   registry.c      — room and client state: create, find, add, remove, broadcast, delete
   protocol.c      — parse_incoming_command_server(), format_*_reply() functions
   display.c       — color-coded terminal output functions
-  threadpool.c    — fixed worker thread pool
+  threadpool.c    — dynamic worker thread pool (auto-scale + shrink)
+  config.c        — key=value config file parser
+  db.c            — SQLite persistence (messages, users with SHA-256 auth)
 
 replies/
   client.c        — full client program (connects, sends commands, displays output)
 
 tests/
   test_registry.c — unit tests for registry functions
+
+server.conf       — runtime config file (key=value, loaded at startup)
 ```
 
 ---
@@ -158,7 +158,8 @@ Text-based, newline-terminated. All commands are case-sensitive.
 
 | Command | Description |
 |---|---|
-| `REGISTER <name>` | Register username (must be first command) |
+| `REGISTER <name> <password>` | Register username with password (must be first command) |
+| `LOGIN <name> <password>` | Login with existing credentials |
 | `CREATE <room>` | Create a room and join it |
 | `JOIN <room>` | Join an existing room |
 | `LEAVE` | Leave current room |
@@ -187,27 +188,35 @@ Text-based, newline-terminated. All commands are case-sensitive.
 ## Architecture
 
 ```
-accept loop (main thread)
+config_load("server.conf")     ← parses key=value, populates server_config_t
       │
       ▼
-  threadpool (16 workers)     ← fixed, no per-connection thread creation
+accept loop (main thread)      ← epoll_wait, non-blocking I/O
       │
       ▼
-handle_client(fd)             ← one worker blocked per active connection
-      │
+  threadpool (dynamic)         ← scales up on load, shrinks on idle
+      │                           configured via server.conf
+      ▼
+handle_client(conn)            ← one worker per burst of data
+      │                           transparent TLS via conn_send/conn_recv
       ├── parse_incoming_command_server()
       ├── registry functions (create_room, room_add_member, etc.)
-      └── format_*_reply() + send()
+      ├── db_* functions (SQLite persistence, user auth)
+      └── format_*_reply() + conn_send()
 
 Global state (registry.c):
   pthread_rwlock_t registry_lock   — guards room_list[] and client_list[]
-  room_t *room_list[16]
-  client_t *client_list[64]
+  room_t *room_list[MAX_ROOMS]
+  client_t *client_list[MAX_CLIENTS]
 
 Per-room state (room_t):
   pthread_mutex_t room_lock        — guards members[] and history[]
-  client_t *members[16]
-  message_t history[10]            — circular buffer, replayed on JOIN
+  client_t *members[MAX_MEMBERS]
+  message_t history[HISTORY_SIZE]  — circular buffer, replayed on JOIN
+
+Database (db.c → chat.db, SQLite WAL mode):
+  messages table — persisted room message history
+  users table    — username + SHA-256 password hash
 ```
 
 ### Locking rules
@@ -222,72 +231,50 @@ Per-room state (room_t):
 
 | Feature | Where |
 |---|---|
-| All 11 client commands | `src/client_handler.c` |
-| Concurrent multi-client (thread pool, 16 workers) | `src/server.c`, `src/threadpool.c` |
+| All 12 client commands (REGISTER, LOGIN, CREATE, JOIN, LEAVE, MSG, PM, WHO, ROOMS, STATUS, KICK, PROMOTE) | `src/client_handler.c` |
+| epoll-based I/O (non-blocking, EPOLLONESHOT) | `src/server.c` |
+| TLS encryption (optional, OpenSSL) | `src/server.c` (`tls_init`, `conn_send`/`conn_recv` wrappers) |
+| Dynamic thread pool (auto-scale up, shrink on idle) | `src/threadpool.c`, `include/threadpool.h` |
+| Runtime config file (`server.conf`, key=value) | `src/config.c`, `include/config.h` |
+| SQLite message history (persistent, loaded on JOIN) | `src/db.c` — `db_save_message`, `db_load_history` |
+| User authentication (REGISTER + LOGIN, SHA-256 passwords) | `src/db.c` — `db_register_user`, `db_verify_user` |
 | Per-room mutex + global rwlock | `src/registry.c`, `include/registry.h` |
-| Message history (last 10, replayed on JOIN) | `src/registry.c` — `room_add_history`, `room_send_history` |
 | Presence status (ONLINE/AWAY/BUSY) | `src/client_handler.c` — `TYPE_STATUS` |
 | Admin commands (KICK, PROMOTE) | `src/client_handler.c` — `TYPE_KICK`, `TYPE_PROMOTE` |
 | Auto-delete empty rooms | `src/registry.c` — `room_delete_if_empty` |
-| Token bucket rate limiting (5 tokens, 1/sec refill) | `src/client_handler.c` — `rate_limit_check` |
+| Token bucket rate limiting (configurable) | `src/client_handler.c` — `rate_limit_check` |
 | Graceful SIGINT shutdown | `src/server.c` — `handle_sigint`, `notify_all_clients` |
 | Color-coded client display with timestamps | `src/display.c`, `replies/client.c` |
 
 ---
 
-## What to Do Next (Scaling Up)
+## What to Do Next
 
-These are ordered from most impactful to most complex.
+All six original scaling tasks are complete. Future work:
 
-### 1. epoll-based I/O (event-driven, high connection counts)
+### 1. Dynamic room/client array sizing
 
-**Problem:** Each of the 16 pool workers is blocked inside `recv()`. If 16 clients are connected but idle, all workers are occupied. A 17th connection queues until one disconnects.
+**Problem:** `MAX_CLIENTS`, `MAX_ROOMS`, `MAX_MEMBERS`, `HISTORY_SIZE` are still compile-time constants used for fixed arrays in `registry.h`. Config loads them at runtime, but the arrays don't resize.
 
-**Solution:** Replace blocking `recv()` with Linux `epoll`. One (or a few) threads handle thousands of sockets via events. Requires:
-- Non-blocking sockets (`fcntl(fd, F_SETFL, O_NONBLOCK)`)
-- `epoll_create1`, `epoll_ctl`, `epoll_wait` in the server loop
-- Per-connection state struct (replaces the local variables in `handle_client`)
-- A state machine instead of a blocking while loop per client
+**Solution:** Convert `room_list[]`, `client_list[]`, `room->members[]`, `room->history[]` to dynamically allocated arrays sized from `server_config_t` at startup. Requires careful lock coordination.
 
-This is the largest change and breaks the current `handle_client` structure. Do this after everything else is stable.
+### 2. Client reconnect handling
 
-### 2. Persistent message history (SQLite or flat file)
+**Problem:** If a client disconnects and reconnects, they must re-register. There is no session persistence.
 
-**Problem:** History is in-memory. Restarting the server loses all room history.
+**Solution:** Store session tokens in the DB or use a reconnection protocol (client sends a session ID on reconnect).
 
-**Solution:** Write each message to a SQLite database or append-only log file on disk. On `create_room`, load existing history. Schema example:
+### 3. Message pagination
 
-```sql
-CREATE TABLE messages (
-    room TEXT, sender TEXT, text TEXT, timestamp INTEGER
-);
-```
+**Problem:** `ROOMS` and `WHO` results are not paginated. Works under current limits but will break with larger pools.
 
-Link with `-lsqlite3`. The `room_add_history` and `room_send_history` functions in `registry.c` are the only places to change.
+**Solution:** Add offset/limit parameters to `WHO` and `ROOMS` commands, or batch large responses.
 
-### 3. Increase pool size dynamically
+### 4. Logging framework
 
-**Problem:** `THREADPOOL_SIZE 16` is a compile-time constant. Under load, 16 workers may not be enough.
+**Problem:** `printf`/`perror` scattered throughout. No log levels, no file output.
 
-**Solution:** Implement a dynamic pool — track idle workers, spin up new ones when queue depth exceeds a threshold, shrink when idle for too long. The `threadpool_t` struct and `threadpool.c` are the only files to touch.
-
-### 4. TLS encryption (OpenSSL)
-
-**Problem:** All traffic is plaintext. Anyone on the network can read messages with tcpdump.
-
-**Solution:** Wrap the socket with OpenSSL's `SSL_read` / `SSL_write` instead of `recv` / `send`. The only files that call `recv`/`send` directly are `client_handler.c`, `registry.c` (broadcast), and `replies/client.c`. Replace those calls with an `ssl_send`/`ssl_recv` wrapper that is either a raw socket call or an SSL call depending on whether TLS is enabled.
-
-### 5. Config file
-
-**Problem:** `THREADPOOL_SIZE`, `RATE_BUCKET_MAX`, `RATE_REFILL_RATE`, `MAX_CLIENTS`, `MAX_ROOMS`, `DEFAULT_PORT` are all compile-time `#define` constants. Changing them requires a recompile.
-
-**Solution:** Parse a simple `server.conf` at startup (INI or key=value format). Override compile-time defaults with runtime values. No external library needed — a small `config.c` parser is enough.
-
-### 6. User authentication (passwords)
-
-**Problem:** Anyone can `REGISTER` any username. There is no password and no persistence — usernames reset on server restart.
-
-**Solution:** Store a `username → hashed_password` map (flat file or SQLite). On `REGISTER`, check if the name exists; if so require a matching password. Use `crypt()` (POSIX) or a simple SHA-256 (add `-lcrypto` from OpenSSL).
+**Solution:** Add a simple `log.h` with `LOG_DEBUG`, `LOG_INFO`, `LOG_WARN`, `LOG_ERROR` macros. Output to stdout + optional log file.
 
 ---
 
@@ -295,27 +282,29 @@ Link with `-lsqlite3`. The `room_add_history` and `room_send_history` functions 
 
 | Limitation | Notes |
 |---|---|
-| Thread pool is fixed at 16 | Max 16 simultaneous active clients. Queue builds up beyond that. |
-| No TLS | All traffic is plaintext |
-| No persistence | All state (users, rooms, history) is lost on restart |
-| No authentication | Any client can claim any username on a fresh server |
-| Rate limit uses wall clock | `clock_gettime(CLOCK_MONOTONIC)` — accurate, but resets on reconnect |
-| `ROOMS` and `WHO` results are not paginated | Works fine under `MAX_ROOMS=16` / `MAX_MEMBERS=16` |
+| Fixed array sizes | `MAX_CLIENTS`, `MAX_ROOMS`, etc. are compile-time; config loads values but arrays don't resize |
 | No reconnect handling | If a client disconnects and reconnects, they must re-register |
+| `ROOMS` and `WHO` results not paginated | Fine under current limits, will need paging at scale |
+| No logging framework | `printf`/`perror` only — no log levels, no file output |
 
 ---
 
 ## Tuning Constants
 
-All in `include/registry.h` and `include/threadpool.h` — no logic changes needed.
+All configurable via `server.conf` at runtime. Defaults below are used when the config file is absent or a key is missing.
 
-| Constant | File | Default | Effect |
-|---|---|---|---|
-| `THREADPOOL_SIZE` | `threadpool.h` | `16` | Max concurrent active clients |
-| `MAX_CLIENTS` | `registry.h` | `64` | Max registered users at once |
-| `MAX_ROOMS` | `registry.h` | `16` | Max simultaneous rooms |
-| `MAX_MEMBERS` | `registry.h` | `16` | Max users per room |
-| `HISTORY_SIZE` | `registry.h` | `10` | Messages replayed on JOIN |
-| `RATE_BUCKET_MAX` | `registry.h` | `5` | Burst allowance per client |
-| `RATE_REFILL_RATE` | `registry.h` | `1.0` | Tokens/second added back |
-| `RATE_MSG_COST` | `registry.h` | `1` | Tokens per MSG or PM |
+| Key | Config Default | Effect |
+|---|---|---|
+| `port` | `8888` | Server listening port |
+| `thread_pool_size` | `16` | Max thread pool workers (pool scales up to this under load) |
+| `pool_min_threads` | `2` | Minimum workers kept alive (pool won't shrink below this) |
+| `pool_shrink_idle_sec` | `30` | Seconds of idleness before an excess worker exits |
+| `max_clients` | `64` | Max registered users at once |
+| `max_rooms` | `16` | Max simultaneous rooms |
+| `max_members` | `16` | Max users per room |
+| `history_size` | `10` | Messages replayed on JOIN |
+| `rate_bucket_max` | `5` | Burst allowance per client (tokens) |
+| `rate_refill_rate` | `1.0` | Tokens/second added back |
+| `rate_msg_cost` | `1` | Tokens consumed per MSG or PM |
+| `tls_cert` | `server.crt` | TLS certificate file path |
+| `tls_key` | `server.key` | TLS private key file path |

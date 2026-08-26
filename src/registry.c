@@ -1,5 +1,6 @@
 #include "../include/registry.h"
 #include "../include/protocol.h"
+#include "../include/db.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -117,6 +118,27 @@ room_t *create_room(const char *room_name, client_t *creator_client, room_err_t 
     new_room->history_start = 0;
     pthread_mutex_init(&new_room->room_lock, NULL);
 
+    // Load prior message history from DB into the in-memory circular buffer
+    db_message_t rows[HISTORY_SIZE];
+    int loaded = db_load_history(room_name, rows, HISTORY_SIZE);
+    for (int i = 0; i < loaded; i++)
+    {
+        int slot = new_room->history_count < HISTORY_SIZE
+                   ? new_room->history_count
+                   : new_room->history_start;
+        if (new_room->history_count >= HISTORY_SIZE)
+            new_room->history_start = (new_room->history_start + 1) % HISTORY_SIZE;
+
+        strncpy(new_room->history[slot].sender, rows[i].sender, MAX_USERNAME_LEN - 1);
+        new_room->history[slot].sender[MAX_USERNAME_LEN - 1] = '\0';
+        strncpy(new_room->history[slot].text, rows[i].text, MAX_TEXT_LEN - 1);
+        new_room->history[slot].text[MAX_TEXT_LEN - 1] = '\0';
+        new_room->history[slot].timestamp = (time_t)rows[i].timestamp;
+
+        if (new_room->history_count < HISTORY_SIZE)
+            new_room->history_count++;
+    }
+
     room_list[room_count++] = new_room;
 
     pthread_rwlock_unlock(&registry_lock);
@@ -200,7 +222,7 @@ void room_broadcast(room_t *room, const char *msg, int exclude_fd)
     for (int i = 0; i < count; i++)
     {
         if (fds[i] == exclude_fd) continue;
-        send(fds[i], msg, strlen(msg), 0);
+        send(fds[i], msg, strlen(msg), MSG_NOSIGNAL);
     }
 }
 
@@ -237,6 +259,9 @@ void room_add_history(room_t *room, const char *sender, const char *text)
         room->history_count++;
 
     pthread_mutex_unlock(&room->room_lock);
+
+    // Persist to database so history survives server restarts
+    db_save_message(room->room_name, sender, text);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -258,7 +283,7 @@ void room_send_history(room_t *room, int fd)
     // Send a header line so client knows history is coming
     char header[MAX_LINE_LEN];
     snprintf(header, sizeof(header), "NOTICE history START %s\n", room->room_name);
-    send(fd, header, strlen(header), 0);
+    send(fd, header, strlen(header), MSG_NOSIGNAL);
 
     // Walk from oldest to newest
     for (int i = 0; i < count; i++)
@@ -268,11 +293,11 @@ void room_send_history(room_t *room, int fd)
         format_msg_reply(line, sizeof(line),
                          room->history[idx].sender,
                          room->history[idx].text);
-        send(fd, line, strlen(line), 0);
+        send(fd, line, strlen(line), MSG_NOSIGNAL);
     }
 
     snprintf(header, sizeof(header), "NOTICE history END %s\n", room->room_name);
-    send(fd, header, strlen(header), 0);
+    send(fd, header, strlen(header), MSG_NOSIGNAL);
 
     pthread_mutex_unlock(&room->room_lock);
 }
@@ -349,7 +374,7 @@ void notify_all_clients(const char *msg)
     pthread_rwlock_unlock(&registry_lock);
 
     for (int i = 0; i < count; i++)
-        send(fds[i], msg, strlen(msg), 0);
+        send(fds[i], msg, strlen(msg), MSG_NOSIGNAL);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

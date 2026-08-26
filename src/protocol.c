@@ -31,7 +31,14 @@ cmd parse_incoming_command_server(char* line)
     else if (strcmp(command, CMD_REGISTER) == 0)
     {
         incoming_command.type = TYPE_REGISTER;
-        incoming_command.arg1 = strtok(NULL, delim);
+        incoming_command.arg1 = strtok(NULL, delim);  // username
+        incoming_command.arg2 = strtok(NULL, delim);  // password
+    }
+    else if (strcmp(command, CMD_LOGIN) == 0)
+    {
+        incoming_command.type = TYPE_LOGIN;
+        incoming_command.arg1 = strtok(NULL, delim);  // username
+        incoming_command.arg2 = strtok(NULL, delim);  // password
     }
     else if (strcmp(command, CMD_CREATE) == 0)
     {
