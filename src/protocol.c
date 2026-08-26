@@ -80,6 +80,24 @@ cmd parse_incoming_command_server(char* line)
         incoming_command.type = TYPE_STATUS;
         incoming_command.arg1 = strtok(NULL, delim);  // ONLINE | AWAY | BUSY
     }
+    else if (strcmp(command, CMD_EDIT) == 0)
+    {
+        incoming_command.type = TYPE_EDIT;
+        incoming_command.arg1 = strtok(NULL, delim);  // message_id
+        incoming_command.arg2 = strtok(NULL, "");     // new_text
+    }
+    else if (strcmp(command, CMD_DELETE) == 0)
+    {
+        incoming_command.type = TYPE_DELETE;
+        incoming_command.arg1 = strtok(NULL, delim);  // message_id
+    }
+    else if (strcmp(command, CMD_HISTORY) == 0)
+    {
+        incoming_command.type = TYPE_HISTORY;
+        incoming_command.arg1 = strtok(NULL, delim);  // room
+        incoming_command.arg2 = strtok(NULL, delim);  // cursor (may be NULL)
+        incoming_command.arg3 = strtok(NULL, delim);  // limit (may be NULL)
+    }
     else if (strcmp(command, CMD_MSG) == 0)
     {
         incoming_command.type = TYPE_MSG;
@@ -131,4 +149,24 @@ void format_msg_reply(char *out, size_t out_size, const char *sender, const char
 void format_pm_reply(char *out, size_t out_size, const char *sender, const char *text)
 {
     snprintf(out, out_size, "%s %s %s\n", REPLY_PM_FROM, sender, text);
+}
+
+void format_msg_reply_id(char *out, size_t out_size, long long msg_id, const char *sender, const char *text)
+{
+    snprintf(out, out_size, "%s %lld %s %s\n", REPLY_MSG, msg_id, sender, text);
+}
+
+void format_history_reply(char *out, size_t out_size, const char *room, long long cursor, int count)
+{
+    snprintf(out, out_size, "%s %s %lld %d\n", REPLY_HISTORY, room, cursor, count);
+}
+
+void format_edited_reply(char *out, size_t out_size, long long msg_id, const char *new_text)
+{
+    snprintf(out, out_size, "%s %lld %s\n", REPLY_EDITED, msg_id, new_text);
+}
+
+void format_deleted_reply(char *out, size_t out_size, long long msg_id)
+{
+    snprintf(out, out_size, "%s %lld\n", REPLY_DELETED, msg_id);
 }

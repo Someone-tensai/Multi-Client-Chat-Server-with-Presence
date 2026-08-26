@@ -93,6 +93,57 @@ void room_destroy(room_t *room)
     free(room);
 }
 
+int registry_load_persistent_rooms(void)
+{
+    if (!room_list) return 0;
+    char rooms[64][32];
+    int n = db_load_rooms(rooms, room_capacity);
+    for (int i=0;i<n;i++) {
+        // Skip if already exists
+        room_err_t err;
+        if (find_room_unlocked(rooms[i], &err)) continue;
+        if (room_count >= room_capacity) break;
+        room_t *r = calloc(1, sizeof(room_t));
+        if (!r) continue;
+        strncpy(r->room_name, rooms[i], MAX_ROOM_NAME_LEN-1);
+        r->room_name[MAX_ROOM_NAME_LEN-1]='\0';
+        r->member_capacity = g_max_members;
+        r->history_capacity = g_history_size;
+        r->member_count=0;
+        r->history_count=0;
+        r->history_start=0;
+        r->admin_client=NULL;
+        if (r->member_capacity>0) r->members=calloc((size_t)r->member_capacity, sizeof(client_t*));
+        if (r->history_capacity>0) r->history=calloc((size_t)r->history_capacity, sizeof(message_t));
+        pthread_mutex_init(&r->room_lock, NULL);
+        // Load history from DB
+        if (r->history_capacity>0) {
+            db_message_t *rows = malloc(sizeof(db_message_t)*(size_t)r->history_capacity);
+            if (rows) {
+                int loaded = db_load_history(rooms[i], rows, r->history_capacity);
+                for (int j=0;j<loaded;j++) {
+                    int cap=r->history_capacity;
+                    int slot = (r->history_count < cap) ? r->history_count : r->history_start;
+                    if (r->history_count >= cap) r->history_start=(r->history_start+1)%cap;
+                    r->history[slot].id=rows[j].id;
+                    strncpy(r->history[slot].sender, rows[j].sender, MAX_USERNAME_LEN-1);
+                    strncpy(r->history[slot].text, rows[j].text, MAX_TEXT_LEN-1);
+                    r->history[slot].timestamp=(time_t)rows[j].timestamp;
+                    r->history[slot].edited_at=(time_t)rows[j].edited_at;
+                    r->history[slot].deleted=rows[j].deleted;
+                    if (r->history_count < cap) r->history_count++;
+                }
+                free(rows);
+            }
+        }
+        pthread_rwlock_wrlock(&registry_lock);
+        if (room_count < room_capacity) room_list[room_count++]=r;
+        else room_destroy(r);
+        pthread_rwlock_unlock(&registry_lock);
+    }
+    return n;
+}
+
 void registry_destroy(void)
 {
     // Acquire write lock to ensure no other thread is accessing
@@ -299,11 +350,14 @@ room_t *create_room(const char *room_name, client_t *creator_client, room_err_t 
                     new_room->history_start = (new_room->history_start + 1) % cap;
                 }
 
+                new_room->history[slot].id = rows[i].id;
                 strncpy(new_room->history[slot].sender, rows[i].sender, MAX_USERNAME_LEN - 1);
                 new_room->history[slot].sender[MAX_USERNAME_LEN - 1] = '\0';
                 strncpy(new_room->history[slot].text, rows[i].text, MAX_TEXT_LEN - 1);
                 new_room->history[slot].text[MAX_TEXT_LEN - 1] = '\0';
                 new_room->history[slot].timestamp = (time_t)rows[i].timestamp;
+                new_room->history[slot].edited_at = (time_t)rows[i].edited_at;
+                new_room->history[slot].deleted = rows[i].deleted;
 
                 if (new_room->history_count < cap)
                     new_room->history_count++;
@@ -426,18 +480,25 @@ void room_broadcast(room_t *room, const char *msg, int exclude_fd)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Room — add a message to history (circular buffer, per-room lock)
+// Returns DB message_id (>0) on success, -1 on failure
 // ─────────────────────────────────────────────────────────────────────────────
-void room_add_history(room_t *room, const char *sender, const char *text)
+long long room_add_history(room_t *room, const char *sender, const char *text)
 {
-    if (room == NULL || sender == NULL || text == NULL) return;
+    if (room == NULL || sender == NULL || text == NULL) return -1;
+
+    // Persist first to get DB id (needed for in-memory history)
+    long long msg_id = db_save_message(room->room_name, sender, text);
+    if (msg_id <= 0) {
+        // Still try to store in memory with synthetic id
+        msg_id = (long long)time(NULL) * 1000000LL + (rand() % 1000000);
+    }
 
     pthread_mutex_lock(&room->room_lock);
 
     int cap = room->history_capacity;
     if (cap <= 0 || !room->history) {
         pthread_mutex_unlock(&room->room_lock);
-        db_save_message(room->room_name, sender, text);
-        return;
+        return msg_id;
     }
 
     int slot;
@@ -451,31 +512,24 @@ void room_add_history(room_t *room, const char *sender, const char *text)
         room->history_start = (room->history_start + 1) % cap;
     }
 
+    room->history[slot].id = msg_id;
     strncpy(room->history[slot].sender, sender, MAX_USERNAME_LEN - 1);
     room->history[slot].sender[MAX_USERNAME_LEN - 1] = '\0';
     strncpy(room->history[slot].text, text, MAX_TEXT_LEN - 1);
     room->history[slot].text[MAX_TEXT_LEN - 1] = '\0';
     room->history[slot].timestamp = time(NULL);
+    room->history[slot].deleted = 0;
+    room->history[slot].edited_at = 0;
 
-    // history_count tracks total messages (capped for replay compatibility we also handle via min)
-    // We increment total, but for replay we use min(total, cap)
-    // To keep backward compat where history_count was capped, we still increment only until cap then keep tracking total via separate logic?
-    // Spec says history_count is total, so we increment always.
-    // However to avoid breaking existing replay that expects capped, we store total and replay uses min.
-    if (room->history_count < 1000000) // avoid overflow
+    if (room->history_count < 1000000)
         room->history_count++;
     else {
-        // If overflow, wrap? Keep at cap
         room->history_count = cap;
     }
-    // For backwards compat, if we want capped behavior, we could cap history_count at cap.
-    // But we want total, so we keep total. To keep replay correct, room_send_history uses min(total, cap).
-    // However if total grows large, history_count will exceed cap, but replay still works.
 
     pthread_mutex_unlock(&room->room_lock);
 
-    // Persist to database so history survives server restarts
-    db_save_message(room->room_name, sender, text);
+    return msg_id;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -507,8 +561,6 @@ void room_send_history(room_t *room, int fd)
     send(fd, header, strlen(header), MSG_NOSIGNAL);
 
     // Walk from oldest to newest
-    // When total < cap, start is 0, so idx = i
-    // When total >= cap, start points to oldest, so idx = (start + i) % cap
     for (int i = 0; i < stored; i++)
     {
         int idx;
@@ -517,9 +569,13 @@ void room_send_history(room_t *room, int fd)
         else
             idx = (room->history_start + i) % cap;
         char line[MAX_LINE_LEN];
-        format_msg_reply(line, sizeof(line),
-                         room->history[idx].sender,
-                         room->history[idx].text);
+        if (room->history[idx].deleted) {
+            snprintf(line, sizeof(line), "%s %lld %s [deleted]\n", REPLY_MSG, room->history[idx].id, room->history[idx].sender);
+        } else {
+            format_msg_reply_id(line, sizeof(line), room->history[idx].id,
+                                room->history[idx].sender,
+                                room->history[idx].text);
+        }
         send(fd, line, strlen(line), MSG_NOSIGNAL);
     }
 
@@ -527,6 +583,78 @@ void room_send_history(room_t *room, int fd)
     send(fd, header, strlen(header), MSG_NOSIGNAL);
 
     pthread_mutex_unlock(&room->room_lock);
+}
+
+message_t *room_find_message(room_t *room, long long msg_id)
+{
+    if (!room || msg_id <=0) return NULL;
+    pthread_mutex_lock(&room->room_lock);
+    int cap = room->history_capacity;
+    int total = room->history_count;
+    int stored = total < cap ? total : cap;
+    message_t *found = NULL;
+    for (int i=0;i<stored;i++) {
+        int idx = (total < cap) ? i : (room->history_start + i) % cap;
+        if (room->history[idx].id == msg_id) {
+            found = &room->history[idx];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&room->room_lock);
+    return found;
+}
+
+int room_edit_message(room_t *room, long long msg_id, const char *requester, const char *new_text)
+{
+    if (!room || !requester || !new_text) return -1;
+    pthread_mutex_lock(&room->room_lock);
+    int cap = room->history_capacity;
+    int total = room->history_count;
+    int stored = total < cap ? total : cap;
+    int idx = -1;
+    for (int i=0;i<stored;i++) {
+        int cur = (total < cap) ? i : (room->history_start + i) % cap;
+        if (room->history[cur].id == msg_id) { idx = cur; break; }
+    }
+    if (idx==-1) { pthread_mutex_unlock(&room->room_lock); return -1; } // not found
+    if (room->history[idx].deleted) { pthread_mutex_unlock(&room->room_lock); return -2; } // already deleted
+    if (strcmp(room->history[idx].sender, requester)!=0) {
+        // Only author can edit, admin check is done outside
+        pthread_mutex_unlock(&room->room_lock);
+        return -3;
+    }
+    strncpy(room->history[idx].text, new_text, MAX_TEXT_LEN-1);
+    room->history[idx].text[MAX_TEXT_LEN-1]='\0';
+    room->history[idx].edited_at = time(NULL);
+    pthread_mutex_unlock(&room->room_lock);
+    db_edit_message(msg_id, new_text);
+    return 0;
+}
+
+int room_delete_message(room_t *room, long long msg_id, const char *requester, int is_admin)
+{
+    if (!room || !requester) return -1;
+    pthread_mutex_lock(&room->room_lock);
+    int cap = room->history_capacity;
+    int total = room->history_count;
+    int stored = total < cap ? total : cap;
+    int idx = -1;
+    for (int i=0;i<stored;i++) {
+        int cur = (total < cap) ? i : (room->history_start + i) % cap;
+        if (room->history[cur].id == msg_id) { idx = cur; break; }
+    }
+    if (idx==-1) { pthread_mutex_unlock(&room->room_lock); return -1; }
+    if (room->history[idx].deleted) { pthread_mutex_unlock(&room->room_lock); return -2; }
+    if (strcmp(room->history[idx].sender, requester)!=0 && !is_admin) {
+        pthread_mutex_unlock(&room->room_lock);
+        return -3;
+    }
+    room->history[idx].deleted = 1;
+    strncpy(room->history[idx].text, "[deleted]", MAX_TEXT_LEN-1);
+    room->history[idx].text[MAX_TEXT_LEN-1]='\0';
+    pthread_mutex_unlock(&room->room_lock);
+    db_delete_message(msg_id);
+    return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

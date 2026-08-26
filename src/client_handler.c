@@ -759,14 +759,157 @@ static int process_line(conn_t *conn, char *line)
                 break;
             }
 
-            format_msg_reply(reply, sizeof(reply), me->client_name, text);
+            long long msg_id = room_add_history(me->current_room, me->client_name, text);
+            if (msg_id > 0) {
+                format_msg_reply_id(reply, sizeof(reply), msg_id, me->client_name, text);
+            } else {
+                format_msg_reply(reply, sizeof(reply), me->client_name, text);
+            }
             room_broadcast(me->current_room, reply, client_fd);
-
-            room_add_history(me->current_room, me->client_name, text);
 
             format_ok_reply(reply, sizeof(reply), OK_SENT);
             conn_send(conn, reply, strlen(reply));
-            LOG_DEBUG("MSG from %s in %s", me->client_name, me->current_room->room_name);
+            LOG_DEBUG("MSG from %s in %s id=%lld", me->client_name, me->current_room->room_name, msg_id);
+            break;
+        }
+
+        case TYPE_EDIT:
+        {
+            if (me->current_room == NULL) {
+                format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            char *id_str = command.arg1;
+            char *new_text = command.arg2;
+            if (id_str == NULL || new_text == NULL || strlen(new_text)==0) {
+                format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            long long msg_id = atoll(id_str);
+            if (msg_id <=0) {
+                format_err_reply(reply, sizeof(reply), ERR_MSG_NOT_FOUND);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            int rc = room_edit_message(me->current_room, msg_id, me->client_name, new_text);
+            if (rc == -1) {
+                format_err_reply(reply, sizeof(reply), ERR_MSG_NOT_FOUND);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            } else if (rc == -2) {
+                format_err_reply(reply, sizeof(reply), ERR_MSG_DELETED);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            } else if (rc == -3) {
+                format_err_reply(reply, sizeof(reply), ERR_NOT_AUTHORIZED);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            format_edited_reply(reply, sizeof(reply), msg_id, new_text);
+            room_broadcast(me->current_room, reply, -1);
+            format_ok_reply(reply, sizeof(reply), OK_SENT);
+            conn_send(conn, reply, strlen(reply));
+            LOG_INFO("User %s edited msg %lld in %s", me->client_name, msg_id, me->current_room->room_name);
+            break;
+        }
+
+        case TYPE_DELETE:
+        {
+            if (me->current_room == NULL) {
+                format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            char *id_str = command.arg1;
+            if (id_str == NULL) {
+                format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            long long msg_id = atoll(id_str);
+            if (msg_id <=0) {
+                format_err_reply(reply, sizeof(reply), ERR_MSG_NOT_FOUND);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            int is_admin = (me->current_room->admin_client == me);
+            int rc = room_delete_message(me->current_room, msg_id, me->client_name, is_admin);
+            if (rc == -1) {
+                format_err_reply(reply, sizeof(reply), ERR_MSG_NOT_FOUND);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            } else if (rc == -2) {
+                format_err_reply(reply, sizeof(reply), ERR_MSG_DELETED);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            } else if (rc == -3) {
+                format_err_reply(reply, sizeof(reply), ERR_NOT_AUTHORIZED);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            format_deleted_reply(reply, sizeof(reply), msg_id);
+            room_broadcast(me->current_room, reply, -1);
+            format_ok_reply(reply, sizeof(reply), OK_SENT);
+            conn_send(conn, reply, strlen(reply));
+            LOG_INFO("User %s deleted msg %lld in %s", me->client_name, msg_id, me->current_room->room_name);
+            break;
+        }
+
+        case TYPE_HISTORY:
+        {
+            // HISTORY <room> [cursor] [limit] — cursor is message_id, 0 means latest
+            char *room_name = command.arg1;
+            char *cursor_str = command.arg2;
+            char *limit_str = command.arg3;
+            // Also handle case where HISTORY was called as HISTORY room cursor limit but our parser put cursor+limit in arg2? Now we have 3 args properly
+            if (room_name == NULL) {
+                // If no room specified, use current room
+                if (me->current_room) room_name = me->current_room->room_name;
+                else {
+                    format_err_reply(reply, sizeof(reply), ERR_NOT_IN_ROOM);
+                    conn_send(conn, reply, strlen(reply));
+                    break;
+                }
+            }
+            long long cursor = 0;
+            int limit = 20;
+            if (cursor_str) cursor = atoll(cursor_str);
+            if (limit_str) limit = atoi(limit_str);
+            // Handle case where user did HISTORY room limit (without cursor) — treat second arg as limit if room specified and no cursor?
+            // We keep simple: if only 2 args and second is numeric and room specified, treat as limit if cursor is small?
+            // For now, require explicit cursor if limit provided.
+            if (limit <=0) limit = 20;
+            if (limit > 100) limit = 100;
+            room_t *room = NULL;
+            room_err_t rerr;
+            room = find_room(room_name, &rerr);
+            if (!room) {
+                format_err_reply(reply, sizeof(reply), ERR_ROOM_NOT_FOUND);
+                conn_send(conn, reply, strlen(reply));
+                break;
+            }
+            db_message_t hist[100];
+            long long next_cursor = 0;
+            int count = db_load_history_before(room_name, cursor, limit, hist, &next_cursor);
+            // Send header
+            char hdr[MAX_LINE_LEN];
+            snprintf(hdr, sizeof(hdr), "%s %s %lld %d\n", REPLY_HISTORY, room_name, next_cursor, count);
+            conn_send(conn, hdr, strlen(hdr));
+            for (int i=0;i<count;i++) {
+                char line[MAX_LINE_LEN];
+                // Use id + sender + text, include deleted marker
+                if (hist[i].deleted) {
+                    snprintf(line, sizeof(line), "%s %lld %s [deleted]\n", REPLY_MSG, hist[i].id, hist[i].sender);
+                } else {
+                    // Use id format for history
+                    snprintf(line, sizeof(line), "%s %lld %s %s\n", REPLY_MSG, hist[i].id, hist[i].sender, hist[i].text);
+                }
+                conn_send(conn, line, strlen(line));
+            }
+            snprintf(hdr, sizeof(hdr), "END_HISTORY %s %lld\n", room_name, next_cursor);
+            conn_send(conn, hdr, strlen(hdr));
             break;
         }
 

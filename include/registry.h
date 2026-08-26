@@ -47,11 +47,14 @@ typedef enum {
 } client_err_t;
 
 
-// Struct to keep Message
+// Struct to keep Message — now with globally unique message_id
 typedef struct message_t {
+    long long id;                 // DB-generated, 0 if not yet persisted
     char sender[MAX_USERNAME_LEN];
     char text[MAX_TEXT_LEN];
     time_t timestamp;
+    int deleted;                  // 0 = active, 1 = deleted (audit)
+    time_t edited_at;             // 0 if never edited
 } message_t;
 
 // Room Defintion — dynamic allocation based on server_config_t
@@ -111,6 +114,7 @@ extern int client_capacity;
 int  registry_init(const server_config_t *cfg);
 void registry_destroy(void);
 void room_destroy(room_t *room);
+int  registry_load_persistent_rooms(void);
 
 
 room_t *create_room(const char *room_name, client_t *creator_client, room_err_t *err);
@@ -119,8 +123,12 @@ room_t *find_room_unlocked(const char* room_name, room_err_t *err);
 void room_add_member(room_t *room, client_t *client, room_err_t *err);
 void room_remove_member(room_t *room, client_t *client, room_err_t *err);
 void room_broadcast(room_t *room, const char *msg, int exclude_fd);
-void room_add_history(room_t *room, const char *sender, const char *text);
+long long room_add_history(room_t *room, const char *sender, const char *text);
 void room_send_history(room_t *room, int fd);
+// Message ID based operations (Janak: Phase 5)
+int room_edit_message(room_t *room, long long msg_id, const char *requester, const char *new_text);
+int room_delete_message(room_t *room, long long msg_id, const char *requester, int is_admin);
+message_t *room_find_message(room_t *room, long long msg_id);
 void delete_room(room_t *room, room_err_t *err);
 void room_delete_if_empty(room_t *room);
 

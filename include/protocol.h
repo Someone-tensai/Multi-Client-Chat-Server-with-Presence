@@ -17,6 +17,9 @@ typedef enum {
     TYPE_KICK,
     TYPE_PROMOTE,
     TYPE_STATUS,
+    TYPE_EDIT,
+    TYPE_DELETE,
+    TYPE_HISTORY,
     TYPE_INVALID
 } cmd_type;
 
@@ -27,6 +30,7 @@ typedef struct cmd
   cmd_type type;
   char* arg1;
   char* arg2;
+  char* arg3;
 } cmd;
 
 // Maximum lengths of messages, usernames etc
@@ -66,6 +70,9 @@ typedef struct cmd
 #define CMD_KICK "KICK"
 #define CMD_PROMOTE "PROMOTE"
 #define CMD_STATUS "STATUS"
+#define CMD_EDIT "EDIT"
+#define CMD_DELETE "DELETE"
+#define CMD_HISTORY "HISTORY"
 #define CMD_INVALID "INVALID"
 // Server -> Client 
 #define REPLY_OK "OK"
@@ -75,6 +82,9 @@ typedef struct cmd
 #define REPLY_PM_FROM "PM_FROM"
 #define REPLY_WHO "WHO_REPLY"
 #define REPLY_ROOMS "ROOMS_REPLY"
+#define REPLY_HISTORY "HISTORY_REPLY"
+#define REPLY_EDITED "MESSAGE_EDITED"
+#define REPLY_DELETED "MESSAGE_DELETED"
 
 // Presence status values (used in STATUS command and WHO reply)
 #define STATUS_ONLINE "ONLINE"
@@ -131,6 +141,9 @@ typedef struct cmd
 #define ERR_MALFORMED "MALFORMED"
 #define ERR_INVALID_TOKEN "INVALID_TOKEN"
 #define ERR_SESSION_EXPIRED "SESSION_EXPIRED"
+#define ERR_MSG_NOT_FOUND "MSG_NOT_FOUND"
+#define ERR_NOT_AUTHORIZED "NOT_AUTHORIZED"
+#define ERR_MSG_DELETED "MSG_DELETED"
 
 // Session token length (hex, 32 bytes = 64 chars)
 #define SESSION_TOKEN_LEN 64
@@ -143,6 +156,10 @@ void format_ok_session(char *out, size_t out_size, const char *status, const cha
 void format_err_reply(char *out, size_t out_size, const char *err_code);
 void format_notice(char *out, size_t out_size, const char *user, const char *action, const char *room);
 void format_msg_reply(char *out, size_t out_size, const char *sender, const char *text);
+void format_msg_reply_id(char *out, size_t out_size, long long msg_id, const char *sender, const char *text);
+void format_history_reply(char *out, size_t out_size, const char *room, long long cursor, int count);
+void format_edited_reply(char *out, size_t out_size, long long msg_id, const char *new_text);
+void format_deleted_reply(char *out, size_t out_size, long long msg_id);
 void format_pm_reply(char *out, size_t out_size, const char *sender, const char *text);
 
 #endif
