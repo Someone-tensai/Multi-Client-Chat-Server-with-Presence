@@ -1,6 +1,7 @@
 #include "../include/server.h"
 #include "../include/registry.h"
 #include "../include/protocol.h"
+#include "../include/db.h"
 #include <time.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -49,7 +50,7 @@ void handle_client(int client_fd)
 
       cmd command = parse_incoming_command_server(input_buffer);
 
-      if(me == NULL && command.type != TYPE_REGISTER)
+      if(me == NULL && command.type != TYPE_REGISTER && command.type != TYPE_LOGIN)
       {
         format_err_reply(reply, sizeof(reply), ERR_NOT_REGISTERED);
         send(client_fd, reply, strlen(reply), 0);
@@ -75,14 +76,32 @@ void handle_client(int client_fd)
                     break;
                 }
 
-                // Create Client
                 char* username = command.arg1;
-                if(username == NULL) 
+                char* password = command.arg2;
+                if(username == NULL || password == NULL) 
                 {
                     format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
                     send(client_fd, reply, strlen(reply), 0);
                     break;
                 }
+
+                // Persist username+password hash BEFORE creating the in-memory client
+                int db_rc = db_register_user(username, password);
+                if(db_rc == -1)
+                {
+                    // username already exists in the DB
+                    format_err_reply(reply, sizeof(reply), ERR_USERNAME_TAKEN);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+                if(db_rc == -2)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Create in-memory client entry
                 me = create_client(client_fd, username, &client_err);
 
                 switch(client_err)
@@ -115,6 +134,77 @@ void handle_client(int client_fd)
                     default:
                         format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
                         send(client_fd, reply, strlen(reply), 0);
+                        break;
+                }
+                break;
+            }
+
+        case TYPE_LOGIN:
+            {
+                // Already logged in
+                if(me != NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_ALREADY_REGISTERED);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                char *username = command.arg1;
+                char *password = command.arg2;
+                if(username == NULL || password == NULL)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_INVALID_COMMAND);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                int verify = db_verify_user(username, password);
+                if(verify == -1)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_UNKNOWN_USER);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+                if(verify == -2)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_WRONG_PASSWORD);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+                if(verify == -3)
+                {
+                    format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
+                    send(client_fd, reply, strlen(reply), 0);
+                    break;
+                }
+
+                // Password matched — create in-memory client
+                me = create_client(client_fd, username, &client_err);
+
+                switch(client_err)
+                {
+                    case CLIENT_OK:
+                        format_ok_reply(reply, sizeof(reply), OK_LOGGED_IN);
+                        send(client_fd, reply, strlen(reply), 0);
+                        break;
+
+                    case CLIENT_ERR_ALREADY_EXISTS:
+                        // Username logged in from another connection
+                        format_err_reply(reply, sizeof(reply), ERR_USERNAME_TAKEN);
+                        send(client_fd, reply, strlen(reply), 0);
+                        me = NULL;
+                        break;
+
+                    case CLIENT_ERR_MAX_CLIENTS:
+                        format_err_reply(reply, sizeof(reply), ERR_MAX_CLIENT_COUNT_REACHED);
+                        send(client_fd, reply, strlen(reply), 0);
+                        me = NULL;
+                        break;
+
+                    default:
+                        format_err_reply(reply, sizeof(reply), ERR_SERVER_ERROR);
+                        send(client_fd, reply, strlen(reply), 0);
+                        me = NULL;
                         break;
                 }
                 break;

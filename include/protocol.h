@@ -5,6 +5,7 @@
 // ENUM to recognise command type
 typedef enum {
     TYPE_REGISTER,
+    TYPE_LOGIN,
     TYPE_CREATE,
     TYPE_JOIN,
     TYPE_MSG,
@@ -15,7 +16,7 @@ typedef enum {
     TYPE_KICK,
     TYPE_PROMOTE,
     TYPE_STATUS,
-    TYPE_INVALID   // unknown/malformed command
+    TYPE_INVALID
 } cmd_type;
 
 // Struct Used for Parsing and stuff
@@ -52,6 +53,7 @@ typedef struct cmd
 
 // Client -> Server
 #define CMD_REGISTER "REGISTER"
+#define CMD_LOGIN "LOGIN"
 #define CMD_CREATE "CREATE"
 #define CMD_JOIN "JOIN"
 #define CMD_MSG "MSG"
@@ -79,6 +81,7 @@ typedef struct cmd
 
 // If the command succeded
 #define OK_REGISTERED "REGISTERED"
+#define OK_LOGGED_IN  "LOGGED_IN"
 #define OK_CREATED "CREATED"
 #define OK_JOINED "JOINED"
 #define OK_LEFT "LEFT"
@@ -94,6 +97,7 @@ typedef struct cmd
 #define ERR_INVALID_COMMAND "INVALID_COMMAND"
 
 #define ERR_USERNAME_TAKEN "USERNAME_TAKEN"
+#define ERR_WRONG_PASSWORD "WRONG_PASSWORD"
 #define ERR_INVALID_USERNAME "INVALID_USERNAME"
 #define ERR_NOT_REGISTERED "NOT_REGISTERED"
 #define ERR_ALREADY_REGISTERED "ALREADY_REGISTERED"

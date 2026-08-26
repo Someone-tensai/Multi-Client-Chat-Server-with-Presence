@@ -1,5 +1,6 @@
 #include "../include/registry.h"
 #include "../include/protocol.h"
+#include "../include/db.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -116,6 +117,27 @@ room_t *create_room(const char *room_name, client_t *creator_client, room_err_t 
     new_room->history_count = 0;
     new_room->history_start = 0;
     pthread_mutex_init(&new_room->room_lock, NULL);
+
+    // Load prior message history from DB into the in-memory circular buffer
+    db_message_t rows[HISTORY_SIZE];
+    int loaded = db_load_history(room_name, rows, HISTORY_SIZE);
+    for (int i = 0; i < loaded; i++)
+    {
+        int slot = new_room->history_count < HISTORY_SIZE
+                   ? new_room->history_count
+                   : new_room->history_start;
+        if (new_room->history_count >= HISTORY_SIZE)
+            new_room->history_start = (new_room->history_start + 1) % HISTORY_SIZE;
+
+        strncpy(new_room->history[slot].sender, rows[i].sender, MAX_USERNAME_LEN - 1);
+        new_room->history[slot].sender[MAX_USERNAME_LEN - 1] = '\0';
+        strncpy(new_room->history[slot].text, rows[i].text, MAX_TEXT_LEN - 1);
+        new_room->history[slot].text[MAX_TEXT_LEN - 1] = '\0';
+        new_room->history[slot].timestamp = (time_t)rows[i].timestamp;
+
+        if (new_room->history_count < HISTORY_SIZE)
+            new_room->history_count++;
+    }
 
     room_list[room_count++] = new_room;
 
@@ -237,6 +259,9 @@ void room_add_history(room_t *room, const char *sender, const char *text)
         room->history_count++;
 
     pthread_mutex_unlock(&room->room_lock);
+
+    // Persist to database so history survives server restarts
+    db_save_message(room->room_name, sender, text);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

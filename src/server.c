@@ -2,6 +2,7 @@
 #include "../include/registry.h"
 #include "../include/threadpool.h"
 #include "../include/protocol.h"
+#include "../include/db.h"
 #include <pthread.h>
 #include <signal.h>
 
@@ -65,6 +66,13 @@ void run_server(int port)
         exit(EXIT_FAILURE);
     }
 
+    // Open (or create) the SQLite database
+    if(db_open() != 0)
+    {
+        fprintf(stderr, "Failed to open database — aborting\n");
+        exit(EXIT_FAILURE);
+    }
+
     printf("Server listening on port %d (Ctrl+C to shut down)\n", port);
 
     struct sockaddr_in client_address;
@@ -106,6 +114,7 @@ void run_server(int port)
     // Stop accepting work and wait for active handlers to finish
     threadpool_destroy(pool);
 
+    db_close();
     close(server_fd);
     printf("Server shut down cleanly.\n");
 }
