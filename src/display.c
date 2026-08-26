@@ -25,6 +25,7 @@ void display_message(const char *room, const char *user, const char *text)
     pthread_mutex_lock(&screen_lock);
     print_timestamp();
     printf( COLOR_BLUE "%s " COLOR_RESET "| "  COLOR_GREEN "%s:" COLOR_RESET " %s"  "\n", room, user, text);
+    fflush(stdout);
     pthread_mutex_unlock(&screen_lock);
 
 }
@@ -34,6 +35,7 @@ void display_pm(const char *from_user, const char *text)
     pthread_mutex_lock(&screen_lock);
     print_timestamp();
     printf(STYLE_PM "[DM from %s]" COLOR_RESET ": %s"  "\n", from_user, text);
+    fflush(stdout);
     pthread_mutex_unlock(&screen_lock);
 
 }
@@ -43,6 +45,7 @@ void display_notice(const char *text)
     pthread_mutex_lock(&screen_lock);
     print_timestamp();
     printf(COLOR_YELLOW"*** NOTICE : %s ***" COLOR_RESET "\n", text);
+    fflush(stdout);
     pthread_mutex_unlock(&screen_lock);
 }
 
@@ -51,6 +54,7 @@ void display_error(const char *err_code)
     pthread_mutex_lock(&screen_lock);
     print_timestamp();
     printf(COLOR_RED "[error] %s !!!" COLOR_RESET "\n", err_code);
+    fflush(stdout);
     pthread_mutex_unlock(&screen_lock);
 }
 
@@ -59,6 +63,7 @@ void display_system(const char *text)
     pthread_mutex_lock(&screen_lock);
     print_timestamp();
     printf(COLOR_YELLOW "[system] %s" COLOR_RESET "\n", text);
+    fflush(stdout);
     pthread_mutex_unlock(&screen_lock);
 }
 

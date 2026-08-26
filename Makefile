@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -I include
 LDFLAGS = -lpthread -lsqlite3 -lssl -lcrypto
 
-SERVER_SRCS = src/server.c src/client_handler.c src/registry.c src/protocol.c src/display.c src/threadpool.c src/db.c
+SERVER_SRCS = src/server.c src/client_handler.c src/registry.c src/protocol.c src/display.c src/threadpool.c src/db.c src/config.c
 CLIENT_SRCS = replies/client.c src/protocol.c src/display.c
 
 SERVER_BIN  = server

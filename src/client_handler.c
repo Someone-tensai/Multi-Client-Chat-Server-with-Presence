@@ -480,7 +480,7 @@ static int process_line(conn_t *conn, char *line)
             target->current_room = NULL;
 
             format_err_reply(reply, sizeof(reply), OK_KICKED);
-            send(target->socket_fd, reply, strlen(reply), 0);
+            send(target->socket_fd, reply, strlen(reply), MSG_NOSIGNAL);
 
             format_notice(reply, sizeof(reply), target_name, OK_KICKED, kicked_from->room_name);
             room_broadcast(kicked_from, reply, target->socket_fd);
@@ -533,7 +533,7 @@ static int process_line(conn_t *conn, char *line)
             me->current_room->admin_client = target;
 
             format_ok_reply(reply, sizeof(reply), OK_PROMOTED);
-            send(target->socket_fd, reply, strlen(reply), 0);
+            send(target->socket_fd, reply, strlen(reply), MSG_NOSIGNAL);
 
             format_notice(reply, sizeof(reply), target_name, OK_PROMOTED, me->current_room->room_name);
             room_broadcast(me->current_room, reply, -1);
@@ -607,7 +607,7 @@ static int process_line(conn_t *conn, char *line)
             }
 
             format_pm_reply(reply, sizeof(reply), me->client_name, text);
-            send(target->socket_fd, reply, strlen(reply), 0);
+            send(target->socket_fd, reply, strlen(reply), MSG_NOSIGNAL);
 
             format_ok_reply(reply, sizeof(reply), OK_SENT);
             conn_send(conn, reply, strlen(reply));

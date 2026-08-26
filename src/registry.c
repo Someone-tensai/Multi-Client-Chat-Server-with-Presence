@@ -222,7 +222,7 @@ void room_broadcast(room_t *room, const char *msg, int exclude_fd)
     for (int i = 0; i < count; i++)
     {
         if (fds[i] == exclude_fd) continue;
-        send(fds[i], msg, strlen(msg), 0);
+        send(fds[i], msg, strlen(msg), MSG_NOSIGNAL);
     }
 }
 
@@ -283,7 +283,7 @@ void room_send_history(room_t *room, int fd)
     // Send a header line so client knows history is coming
     char header[MAX_LINE_LEN];
     snprintf(header, sizeof(header), "NOTICE history START %s\n", room->room_name);
-    send(fd, header, strlen(header), 0);
+    send(fd, header, strlen(header), MSG_NOSIGNAL);
 
     // Walk from oldest to newest
     for (int i = 0; i < count; i++)
@@ -293,11 +293,11 @@ void room_send_history(room_t *room, int fd)
         format_msg_reply(line, sizeof(line),
                          room->history[idx].sender,
                          room->history[idx].text);
-        send(fd, line, strlen(line), 0);
+        send(fd, line, strlen(line), MSG_NOSIGNAL);
     }
 
     snprintf(header, sizeof(header), "NOTICE history END %s\n", room->room_name);
-    send(fd, header, strlen(header), 0);
+    send(fd, header, strlen(header), MSG_NOSIGNAL);
 
     pthread_mutex_unlock(&room->room_lock);
 }
@@ -374,7 +374,7 @@ void notify_all_clients(const char *msg)
     pthread_rwlock_unlock(&registry_lock);
 
     for (int i = 0; i < count; i++)
-        send(fds[i], msg, strlen(msg), 0);
+        send(fds[i], msg, strlen(msg), MSG_NOSIGNAL);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

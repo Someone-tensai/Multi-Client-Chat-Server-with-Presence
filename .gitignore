@@ -1,3 +1,7 @@
-.env
-*.exe
-build/
+server
+client
+*.db
+*.db-shm
+*.db-wal
+server.crt
+server.key

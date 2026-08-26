@@ -15,11 +15,28 @@ static char   current_room[MAX_ROOM_NAME_LEN] = "";
 static volatile int running = 1;
 
 // ─────────────────────────────────────────────
-// TLS — try to connect with TLS; fall back to
-// plain-text if the server doesn't speak TLS.
+// TLS — read the server's 1-byte protocol greeting
+// to decide TLS vs plain-text, then handshake if needed.
+//
+// Protocol:
+//   Server sends 'T' if TLS is enabled, 'P' if plain-text.
+//   Client reads this byte FIRST, then acts accordingly.
 // ─────────────────────────────────────────────
 static SSL *tls_connect(int fd)
 {
+    // Read 1-byte protocol greeting from server
+    char greeting;
+    ssize_t n = recv(fd, &greeting, 1, 0);  // blocking read
+    if (n != 1)
+        return NULL;  // connection error or closed
+
+    if (greeting == 'P')
+        return NULL;  // server is plain-text, no TLS needed
+
+    if (greeting != 'T')
+        return NULL;  // unknown greeting, assume plain-text
+
+    // Server says TLS — perform handshake
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) return NULL;
 
@@ -33,7 +50,9 @@ static SSL *tls_connect(int fd)
     SSL_set_fd(s, fd);
     if (SSL_connect(s) <= 0)
     {
-        ERR_print_errors_fp(stderr);
+        // TLS handshake failed — disconnect, don't fall back
+        // (server expects TLS but we can't speak it)
+        printf("[info] TLS handshake failed — server expects TLS\n");
         SSL_free(s);
         return NULL;
     }
@@ -301,7 +320,8 @@ static void *receiver_thread(void *arg)
 static void print_help(void)
 {
     display_system("Commands:");
-    display_system("  REGISTER <name>      - register your username");
+    display_system("  REGISTER <name> <pass> - register with password");
+    display_system("  LOGIN <name> <pass>    - login with existing account");
     display_system("  CREATE <room>        - create and join a room");
     display_system("  JOIN <room>          - join an existing room");
     display_system("  LEAVE                - leave current room");

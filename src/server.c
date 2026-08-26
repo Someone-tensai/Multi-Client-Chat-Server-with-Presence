@@ -10,16 +10,14 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <errno.h>
+#include <time.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // TLS — global SSL context (NULL when TLS is disabled)
 // ─────────────────────────────────────────────────────────────────────────────
-#define TLS_CERT_FILE "server.crt"
-#define TLS_KEY_FILE  "server.key"
-
 static SSL_CTX *ssl_ctx = NULL;
 
-static SSL_CTX *tls_init(void)
+static SSL_CTX *tls_init(const char *cert_file, const char *key_file)
 {
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx)
@@ -29,16 +27,14 @@ static SSL_CTX *tls_init(void)
         return NULL;
     }
 
-    if (SSL_CTX_use_certificate_file(ctx, TLS_CERT_FILE, SSL_FILETYPE_PEM) <= 0 ||
-        SSL_CTX_use_PrivateKey_file (ctx, TLS_KEY_FILE,  SSL_FILETYPE_PEM) <= 0)
+    if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) <= 0 ||
+        SSL_CTX_use_PrivateKey_file (ctx, key_file,  SSL_FILETYPE_PEM) <= 0)
     {
-        fprintf(stderr,
-            "TLS: could not load %s / %s\n"
-            "     To generate a self-signed cert run:\n"
-            "       openssl req -x509 -newkey rsa:2048 -keyout server.key \\\n"
-            "                   -out server.crt -days 365 -nodes -subj '/CN=localhost'\n",
-            TLS_CERT_FILE, TLS_KEY_FILE);
-        ERR_print_errors_fp(stderr);
+        printf("TLS: certificate files not found (%s / %s) — TLS disabled\n"
+               "     To enable TLS, generate a self-signed cert:\n"
+               "       openssl req -x509 -newkey rsa:2048 -keyout server.key \\\n"
+               "                   -out server.crt -days 365 -nodes -subj '/CN=localhost'\n",
+               cert_file, key_file);
         SSL_CTX_free(ctx);
         return NULL;
     }
@@ -49,13 +45,48 @@ static SSL_CTX *tls_init(void)
 
 // ─────────────────────────────────────────────────────────────────────────────
 // conn_send / conn_recv — transparent TLS wrappers
-// Used by client_handler.c and registry.c (broadcast) instead of send/recv.
+//
+// conn_send retries on EAGAIN/partial writes so that non-blocking sockets
+// never silently drop replies.  For small protocol messages (well under 4 KB)
+// the loop will almost always complete in a single iteration.
 // ─────────────────────────────────────────────────────────────────────────────
 ssize_t conn_send(conn_t *conn, const char *buf, size_t len)
 {
     if (conn->ssl)
         return (ssize_t)SSL_write(conn->ssl, buf, (int)len);
-    return send(conn->fd, buf, len, 0);
+
+    // Non-blocking plain-text send with retry on EAGAIN / partial write
+    size_t total = 0;
+    while (total < len)
+    {
+        ssize_t n = send(conn->fd, buf + total, len - total, MSG_NOSIGNAL);
+        if (n > 0)
+        {
+            total += (size_t)n;
+        }
+        else if (n == 0)
+        {
+            // Peer closed
+            return (ssize_t)total ? (ssize_t)total : -1;
+        }
+        else
+        {
+            // n < 0
+            if (errno == EINTR)
+                continue;   // signal interrupted, retry
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                // Kernel buffer temporarily full — brief pause then retry.
+                // This is acceptable because we are inside a dedicated
+                // worker thread processing this connection.
+                struct timespec ts = {0, 1000000L}; // 1 ms
+                nanosleep(&ts, NULL);
+                continue;
+            }
+            return -1;  // real error
+        }
+    }
+    return (ssize_t)total;
 }
 
 ssize_t conn_recv(conn_t *conn, char *buf, size_t len)
@@ -97,11 +128,6 @@ void conn_free(conn_t *conn)
 // ─────────────────────────────────────────────────────────────────────────────
 // epoll helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-// Add a new client fd to the epoll instance.
-// EPOLLONESHOT: once the event fires the fd is disabled until explicitly
-// re-armed by handle_client.  This guarantees only one worker processes
-// a given connection at a time.
 static void epoll_add(int epoll_fd, conn_t *conn)
 {
     struct epoll_event ev;
@@ -111,7 +137,6 @@ static void epoll_add(int epoll_fd, conn_t *conn)
         perror("epoll_ctl ADD");
 }
 
-// Re-arm after handle_client finishes processing a burst.
 void epoll_rearm(conn_t *conn)
 {
     struct epoll_event ev;
@@ -132,11 +157,22 @@ static void handle_sigint(int sig)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// main entry
+// main entry — load config, then start the server
 // ─────────────────────────────────────────────────────────────────────────────
-int main(void)
+int main(int argc, char *argv[])
 {
-    run_server(DEFAULT_PORT);
+    server_config_t cfg;
+    const char *conf_path = "server.conf";
+
+    if (argc > 1)
+        conf_path = argv[1];
+
+    if (config_load(&cfg, conf_path) == 0)
+        printf("Loaded config from %s\n", conf_path);
+    else
+        printf("No config file found — using defaults\n");
+
+    run_server(&cfg);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,7 +180,7 @@ int main(void)
 // ─────────────────────────────────────────────────────────────────────────────
 #define MAX_EVENTS 64
 
-void run_server(int port)
+void run_server(server_config_t *cfg)
 {
     // Install SIGINT handler
     struct sigaction sa;
@@ -154,7 +190,7 @@ void run_server(int port)
     sigaction(SIGINT, &sa, NULL);
 
     // ── TLS (optional) ───────────────────────────────────────────────────────
-    ssl_ctx = tls_init();
+    ssl_ctx = tls_init(cfg->tls_cert, cfg->tls_key);
     if (!ssl_ctx)
         printf("TLS disabled — running in plain-text mode\n"
                "(generate server.crt + server.key to enable)\n");
@@ -176,7 +212,7 @@ void run_server(int port)
     struct sockaddr_in addr;
     addr.sin_family      = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    addr.sin_port        = htons(port);
+    addr.sin_port        = htons(cfg->port);
 
     if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0)
         { perror("bind"); exit(EXIT_FAILURE); }
@@ -184,40 +220,49 @@ void run_server(int port)
     if (listen(server_fd, BACKLOG) < 0)
         { perror("listen"); exit(EXIT_FAILURE); }
 
-    // ── Thread pool ───────────────────────────────────────────────────────────
-    threadpool_t *pool = threadpool_create(THREADPOOL_SIZE);
+    // ── Thread pool (dynamic) ─────────────────────────────────────────────────
+    threadpool_t *pool = threadpool_create(cfg->thread_pool_size);
     if (!pool) { perror("threadpool_create"); exit(EXIT_FAILURE); }
+    pool->min_threads     = cfg->pool_min_threads;
+    pool->shrink_idle_sec = cfg->pool_shrink_idle_sec;
 
     // ── epoll ─────────────────────────────────────────────────────────────────
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0) { perror("epoll_create1"); exit(EXIT_FAILURE); }
 
-    // Watch the server socket for new connections (no ONESHOT — always active)
     struct epoll_event ev;
     ev.events   = EPOLLIN;
     ev.data.fd  = server_fd;
     epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev);
 
     printf("Server listening on port %d (%s) — Ctrl+C to shut down\n",
-           port, ssl_ctx ? "TLS" : "plain-text");
+           cfg->port, ssl_ctx ? "TLS" : "plain-text");
 
     struct epoll_event events[MAX_EVENTS];
+    time_t last_shrink_check = time(NULL);
 
     while (!shutdown_flag)
     {
-        // 500 ms timeout so we can check shutdown_flag regularly
         int n = epoll_wait(epoll_fd, events, MAX_EVENTS, 500);
 
         if (n < 0)
         {
-            if (errno == EINTR) break;   // SIGINT fired
+            if (errno == EINTR) break;
             perror("epoll_wait");
             break;
         }
 
+        // ── Periodic dynamic pool shrink check ────────────────────────────
+        time_t now = time(NULL);
+        if (now - last_shrink_check >= 5)
+        {
+            threadpool_maybe_shrink(pool);
+            last_shrink_check = now;
+        }
+
         for (int i = 0; i < n; i++)
         {
-            // ── New connection ────────────────────────────────────────────────
+            // ── New connection ────────────────────────────────────────────
             if (events[i].data.fd == server_fd)
             {
                 struct sockaddr_in cli_addr;
@@ -231,11 +276,6 @@ void run_server(int port)
                     continue;
                 }
 
-                // Make the client fd non-blocking
-                int flags = fcntl(client_fd, F_GETFL, 0);
-                fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
-
-                // Allocate per-connection state
                 conn_t *conn = conn_create(client_fd, epoll_fd);
                 if (!conn)
                 {
@@ -244,7 +284,22 @@ void run_server(int port)
                     continue;
                 }
 
-                // TLS handshake (if TLS is enabled)
+                // Send protocol greeting BEFORE setting O_NONBLOCK so send()
+                // cannot fail with EAGAIN.  Client reads this byte first to
+                // decide whether to attempt TLS.
+                char greeting = ssl_ctx ? 'T' : 'P';
+                if (send(client_fd, &greeting, 1, MSG_NOSIGNAL) != 1)
+                {
+                    perror("send greeting");
+                    conn_free(conn);
+                    close(client_fd);
+                    continue;
+                }
+
+                // Now switch to non-blocking for the epoll-driven I/O loop
+                int flags = fcntl(client_fd, F_GETFL, 0);
+                fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+
                 if (ssl_ctx)
                 {
                     conn->ssl = SSL_new(ssl_ctx);
@@ -261,23 +316,19 @@ void run_server(int port)
                 printf("New client connected (fd=%d%s)\n",
                        client_fd, ssl_ctx ? ", TLS" : "");
 
-                // Register with epoll — EPOLLONESHOT arms it for the first read
                 epoll_add(epoll_fd, conn);
                 continue;
             }
 
-            // ── Existing client has data (or disconnected) ────────────────────
+            // ── Existing client has data (or disconnected) ────────────────
             conn_t *conn = (conn_t *)events[i].data.ptr;
 
-            // EPOLLRDHUP/EPOLLERR/EPOLLHUP → peer closed or error.
-            // Still dispatch to the pool so handle_client can run cleanup.
             if (events[i].events & (EPOLLRDHUP | EPOLLERR | EPOLLHUP))
                 conn->closing = 1;
 
             if (threadpool_submit(pool, conn) != 0)
             {
                 fprintf(stderr, "threadpool_submit failed (queue full?)\n");
-                // Re-arm so we don't lose the fd permanently
                 if (!conn->closing)
                     epoll_rearm(conn);
             }
@@ -291,7 +342,7 @@ void run_server(int port)
     snprintf(msg, sizeof(msg), "ERR %s\n", ERR_SERVER_SHUTDOWN);
     notify_all_clients(msg);
 
-    struct timespec wait = {0, 200000000L};   // 200 ms
+    struct timespec wait = {0, 200000000L};
     nanosleep(&wait, NULL);
 
     threadpool_destroy(pool);
