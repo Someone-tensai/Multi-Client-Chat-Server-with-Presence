@@ -157,6 +157,8 @@ static void handle_server_line(char *line)
             display_system("User promoted to admin.");
         else if (strcmp(status, OK_STATUS_SET) == 0)
             display_system("Status updated.");
+        else if (strcmp(status, REPLY_LOGOUT) == 0)
+            display_system("Logged out.");
         else if (strcmp(status, OK_SENT) == 0)
         {
             // Silent — no need to echo "sent" back to user
@@ -323,6 +325,70 @@ static void handle_server_line(char *line)
         char *text   = rest;
         if (sender && text)
             display_pm(sender, text);
+    }
+
+    // ── SESSIONS_REPLY <count> [tokens...] ─────────────
+    else if (strcmp(first, REPLY_SESSIONS) == 0)
+    {
+        char *count_str = next_token(&rest, " ");
+        int count = count_str ? atoi(count_str) : 0;
+        char buf[MAX_LINE_LEN];
+        if (count == 0) {
+            display_system("No active sessions.");
+        } else {
+            int off = snprintf(buf, sizeof(buf), "Active sessions (%d):", count);
+            char *tok;
+            while ((tok = next_token(&rest, " ")) != NULL) {
+                off += snprintf(buf + off, sizeof(buf) - off, " %s", tok);
+            }
+            display_system(buf);
+        }
+    }
+
+    // ── READ_RECEIPT <msg_id> <reader> ────────────────
+    else if (strcmp(first, REPLY_READ_RECEIPT) == 0)
+    {
+        char *msg_id = next_token(&rest, " ");
+        char *reader = next_token(&rest, " ");
+        if (msg_id && reader) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "%s read message #%s", reader, msg_id);
+            display_notice(buf);
+        }
+    }
+
+    // ── TYPING <user> ─────────────────────────────────
+    else if (strcmp(first, REPLY_TYPING) == 0)
+    {
+        char *user = next_token(&rest, " ");
+        if (user) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%s is typing...", user);
+            display_notice(buf);
+        }
+    }
+
+    // ── STOP_TYPING <user> ────────────────────────────
+    else if (strcmp(first, REPLY_STOP_TYPING) == 0)
+    {
+        char *user = next_token(&rest, " ");
+        if (user) {
+            char buf[128];
+            snprintf(buf, sizeof(buf), "%s stopped typing.", user);
+            display_notice(buf);
+        }
+    }
+
+    // ── LOGOUT_OK ──────────────────────────────────────
+    else if (strcmp(first, REPLY_LOGOUT) == 0)
+    {
+        display_system("Logged out.");
+    }
+
+    // ── END_HISTORY ────────────────────────────────────
+    else if (strcmp(first, "END_HISTORY") == 0)
+    {
+        display_system("--- end of history ---");
     }
 
     // ── WHO_REPLY [<total> <offset> <count>] <name>/<status> ... ─
@@ -505,6 +571,16 @@ static void print_help(void)
     display_system("  KICK <user>          - kick a user (admin only)");
     display_system("  PROMOTE <user>       - make a user admin (admin only)");
     display_system("  STATUS <ONLINE|AWAY|BUSY> - set your presence status");
+    display_system("  EDIT <id> <text>     - edit your message");
+    display_system("  DELETE <id>          - delete a message");
+    display_system("  HISTORY [room] [cursor] [limit] - view message history");
+    display_system("  READ <msg_id>        - mark message as read (receipt)");
+    display_system("  TYPING               - broadcast typing indicator");
+    display_system("  STOP_TYPING          - stop typing indicator");
+    display_system("  SESSIONS             - list your active sessions");
+    display_system("  REVOKE_SESSION <token> - revoke a session");
+    display_system("  LOGOUT               - logout current session");
+    display_system("  LOGOUT_ALL           - logout all sessions");
     display_system("  /help                - show this help");
     display_system("  /quit                - disconnect and exit");
     display_system("Pagination: e.g. WHO 0 10, ROOMS 0 10");
