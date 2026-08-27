@@ -582,6 +582,16 @@ static void print_help(void)
     display_system("  REVOKE_SESSION <token> - revoke a session");
     display_system("  LOGOUT               - logout current session");
     display_system("  LOGOUT_ALL           - logout all sessions");
+    display_system("  BLOCK <user>         - block a user (hide their messages)");
+    display_system("  UNBLOCK <user>       - unblock a user");
+    display_system("  MUTE <user>          - mute a user in room (admin)");
+    display_system("  UNMUTE <user>        - unmute a user (admin)");
+    display_system("  BAN <user>           - ban a user (admin/owner)");
+    display_system("  DEMOTE <user>        - demote admin to member (owner only)");
+    display_system("  CREATE_PRIVATE <room> - create private invite-only room");
+    display_system("  INVITE <user> <room> - invite user to private room");
+    display_system("  ACCEPT <room>        - accept private room invite");
+    display_system("  DECLINE <room>       - decline private room invite");
     display_system("  /help                - show this help");
     display_system("  /quit                - disconnect and exit");
     display_system("Pagination: e.g. WHO 0 10, ROOMS 0 10, HISTORY demoRoom 0 20");
